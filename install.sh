@@ -390,6 +390,8 @@ task_deps() {
         missing="$missing $p"
     done
     if [ -n "$missing" ]; then
+        echo "нужны пакеты Termux: python — оформление и мерж настроек,"
+        echo "nodejs — ИИ-ассистент и бесплатные модели, unzip/tar — архивы."
         echo "доставляю:$missing"
         # shellcheck disable=SC2086
         pkg install -y $missing || {
