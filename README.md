@@ -64,6 +64,51 @@ pkg install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Forle
 Флаги для «неинтерактивно»: `--yes`, `--no-apk`, `--no-opencode`,
 `--no-models`, `--no-code-server`, `--no-design`, `--dry` (см. `--help`).
 
+Всё сразу, без вопросов:
+
+```bash
+pkg install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/install.sh) -y
+```
+
+### Доступ к файлам Termux (чтобы не ругался)
+
+```bash
+termux-setup-storage          # один раз → системный диалог → «Разрешить»
+ls ~/storage/shared/Download  # показал список — доступ есть
+```
+
+Если всё равно `Permission denied` на `/storage/emulated/0/…`, разрешение
+закрыто на уровне Android:
+
+* **Настройки → Приложения → Termux → Разрешения → Файлы и медиа →
+  «Управление всеми файлами»**;
+* **HyperOS/MIUI:** Приложения → Управление приложениями → Termux →
+  Разрешения → Хранилище → **«Всегда разрешать»**;
+* затем повторить `termux-setup-storage`.
+
+Для установки APK вне «магазинов» Termux ещё нужно разрешить:
+**Настройки → Специальные возможности → Установка приложений →
+Termux → Разрешить**.
+
+### Установка APK вручную (командами Termux)
+
+```bash
+termux-setup-storage
+
+# 1) скачать APK из релиза
+curl -fL -o "$HOME/storage/shared/Download/CodeMobile.apk" \
+  https://github.com/Forlein/codemobile/releases/download/v1.0.0/CodeMobile-v1.0.0.apk
+
+# 2) установить (обновление сохраняет данные приложения)
+pm install -r "$HOME/storage/shared/Download/CodeMobile.apk"
+
+# 3) запасной путь, если pm отказал — системный установщик Android
+termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
+```
+
+Если `pm` отвечает `Failure [INSTALL_*]` — у шелла нет прав: используйте
+`adb install -r <apk>` с ПК либо `rish pm install -r <apk>` через Shizuku.
+
 ### Что именно скачивается и ставится
 
 1. **tur-repo** — репозиторий Termux с нужными пакетами;
