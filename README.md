@@ -64,7 +64,7 @@ pkg install -y curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/For
 ```
 
 В самом конце поставь APK‑лаунчер (иконка **«VS Code»**) — или скачай
-`CodeMobile-*.apk` из [Releases](../../releases) и открой его.
+`CodeMobile-*.apk` из [Releases](https://github.com/Forlein/codemobile/releases) и открой его.
 
 ### Если GitHub недоступен или тормозит
 
