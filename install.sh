@@ -15,12 +15,21 @@
 #    9.  APK-лаунчер (скачать из релиза GitHub и установить)
 #   10.  Проверка ошибок и подсказки по решению
 #
+#  Режим разработчика (--build): доставить JDK 21, нативный aapt2 и Android
+#  SDK (платформа 34, build-tools 36) и СОБРАТЬ APK прямо в Termux — без ПК.
+#
 #  Запуск (любой из вариантов):
-#    pkg install curl
+#    # 1) самый простой — через установщик-загрузчик get.sh (git не нужен):
+#    sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/get.sh)"
+#
+#    # 2) напрямую (если исходники уже есть или скачаются сами):
 #    bash <(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/install.sh)
 #
-#    # или из клонированного репозитория:
+#    # 3) из готовых исходников (скачанных get.sh, zip-архивом или git clone):
 #    git clone https://github.com/Forlein/codemobile && cd codemobile && bash install.sh
+#
+#  Git и python для загрузки НЕ нужны: install.sh сам скачивает архив проекта
+#  (GitHub + зеркала-прокси), а зависимости доставляет пакетным менеджером.
 #
 #  Флаги:
 #    -y, --yes        не задавать вопросов, ставить всё по умолчанию
@@ -31,6 +40,10 @@
 #    --no-design      без оформления/дизайна
 #    --no-apk         не качать/не ставить APK
 #    --no-hints       без инструкций Xiaomi/Shizuku
+#    --build          поставить JDK+aapt2+Android SDK и собрать APK в Termux
+#    --no-build       не собирать APK (только скачать готовый из релиза)
+#    --mirror URL     скачивать исходники через зеркало-прокси GitHub
+#    --refresh        перекачать исходники, даже если они уже есть
 #    -h, --help
 #
 #  Коды выхода: 0 — ок, 1 — были ошибки.
@@ -40,12 +53,23 @@ set -uo pipefail
 # ── Репозиторий (для bootstrap и скачивания APK) ─────────────────────────────
 GITHUB_REPO="${CODEMOBILE_REPO:-Forlein/codemobile}"
 GITHUB_BRANCH="${CODEMOBILE_BRANCH:-main}"
+# Зеркала-прокси GitHub: подставляются ПЕРЕД адресом (работают и для raw, и для
+# архивов). Нужны там, где github.com/raw недоступен или очень медленный.
+GITHUB_MIRRORS="${CODEMOBILE_MIRRORS:-https://ghproxy.net/,https://gh-proxy.com/,https://ghfast.top/}"
+RAW_CDN="https://cdn.jsdelivr.net/gh"     # jsDelivr — быстрый доступ к файлам репо
+REFRESH_SRC=0                             # --refresh: перекачать исходники
 
 PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
 HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
 export PATH="$PREFIX/bin:$PREFIX/opt/nodejs-24/bin:$PATH"
 SRC_DIR="$HOME_DIR/.local/share/codemobile/src"
 PKG_APP="com.example.opencodelauncher"
+
+# ── Набор для сборки в Termux (режим --build) ────────────────────────────────
+SDK_DIR="$HOME_DIR/android-sdk"
+SDK_PLATFORM="platforms;android-34"
+SDK_BUILDTOOLS="build-tools;36.0.0"
+CMDLINE_TOOLS_URL="https://dl.google.com/android/repository/commandlinetools-linux-11076708_latest.zip"
 
 # Корень проекта = каталог install.sh (если он есть файлом). При запуске через
 # `bash <(curl …)` файла рядом нет — сработает bootstrap ниже.
@@ -69,15 +93,20 @@ CodeMobile — установщик VS Code + OpenCode в Termux (одной к�
   bash install.sh --no-design        без оформления
   bash install.sh --no-apk           без APK-лаунчера
   bash install.sh --no-hints         без инструкций Xiaomi/Shizuku
+  bash install.sh --build            собрать APK прямо в Termux (JDK + Android SDK)
+  bash install.sh --no-build         только скачать готовый APK из релиза
+  bash install.sh --mirror URL       качать исходники через зеркало-прокси GitHub
+  bash install.sh --refresh          перекачать исходники заново
   bash install.sh --help
 
 Репозиторий можно переопределить: CODEMOBILE_REPO=owner/repo bash install.sh
+Зеркала: CODEMOBILE_MIRRORS="https://ghproxy.net/,https://gh-proxy.com/"
 USAGE
 }
 
 # ── Разбор флагов ────────────────────────────────────────────────────────────
 ASSUME_YES=0; DRY=0
-WANT_OPENCODE=2; WANT_MODELS=2; WANT_CODESERVER=2; WANT_DESIGN=2; WANT_APK=2; WANT_HINTS=1
+WANT_OPENCODE=2; WANT_MODELS=2; WANT_CODESERVER=2; WANT_DESIGN=2; WANT_APK=2; WANT_BUILD=2; WANT_HINTS=1
 for a in "$@"; do
     case "$a" in
         -y|--yes)        ASSUME_YES=1 ;;
@@ -87,6 +116,11 @@ for a in "$@"; do
         --no-code-server) WANT_CODESERVER=0 ;;
         --no-design)     WANT_DESIGN=0 ;;
         --no-apk)        WANT_APK=0 ;;
+        --build)         WANT_BUILD=1 ;;
+        --no-build)      WANT_BUILD=0 ;;
+        --mirror)        shift; [ $# -gt 0 ] || { echo "--mirror требует URL"; exit 2; }
+                         GITHUB_MIRRORS="${GITHUB_MIRRORS:+$GITHUB_MIRRORS,}$1" ;;
+        --refresh)       REFRESH_SRC=1 ;;
         --no-hints)      WANT_HINTS=0 ;;
         -h|--help)       usage; exit 0 ;;
         *) echo "неизвестный флаг: $a (см. --help)"; exit 2 ;;
@@ -180,6 +214,77 @@ run_step() {                 # run_step <номер> <метка> <функци�
 FAILS=0
 
 # ── Bootstrap: если запущено из pipe (`curl | bash`), tools/ рядом нет ───────
+#     Скачиваем архив проекта сами: git и python для этого не нужны.
+#     Зеркало → зеркало: если GitHub недоступен, пробуем ghproxy/gh-proxy/ghfast.
+DL_TOOL=""
+pick_dl() {
+    if   command -v curl    >/dev/null 2>&1; then DL_TOOL=curl
+    elif command -v wget    >/dev/null 2>&1; then DL_TOOL=wget
+    elif command -v python3 >/dev/null 2>&1; then DL_TOOL=python3
+    elif command -v node    >/dev/null 2>&1; then DL_TOOL=node
+    else DL_TOOL=""
+    fi
+}
+
+ensure_dl() {
+    pick_dl
+    [ -n "$DL_TOOL" ] && return 0
+    info "нет curl/wget/python3 — доставляю curl пакетом…"
+    (command -v pkg >/dev/null 2>&1 && pkg install -y curl) \
+     || (command -v apt >/dev/null 2>&1 && apt install -y curl) || true
+    pick_dl
+    [ -n "$DL_TOOL" ] && return 0
+    err "нечем качать: поставь curl → pkg install curl"
+    return 1
+}
+
+cm_download() {                      # cm_download <url> <файл>
+    local url="$1" file="$2"
+    rm -f "$file" 2>/dev/null
+    case "$DL_TOOL" in
+        curl)
+            if [ -t 1 ]; then
+                curl -fL --progress-bar --retry 3 --retry-delay 2 \
+                     --connect-timeout 20 --max-time 900 -o "$file" "$url"
+            else
+                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 \
+                     --max-time 900 -o "$file" "$url"
+            fi ;;
+        wget) wget -O "$file" --tries=3 --timeout=30 -q --show-progress "$url" ;;
+        python3)
+            python3 - "$url" "$file" <<'PY'
+import sys, urllib.request
+url, out = sys.argv[1], sys.argv[2]
+req = urllib.request.Request(url, headers={"User-Agent": "CodeMobile/1.0"})
+with urllib.request.urlopen(req, timeout=60) as r, open(out, "wb") as f:
+    while True:
+        b = r.read(65536)
+        if not b: break
+        f.write(b)
+PY
+            ;;
+        node)
+            node -e '
+const fs=require("fs");const [u,o]=process.argv.slice(1);
+fetch(u,{redirect:"follow"}).then(async r=>{if(!r.ok){console.error("HTTP "+r.status);process.exit(1)}
+fs.writeFileSync(o,Buffer.from(await r.arrayBuffer()))}).catch(e=>{console.error(String(e));process.exit(1)});' "$url" "$file" ;;
+        *) return 1 ;;
+    esac
+}
+
+# Список адресов архива: GitHub → jsDelivr-нет (только файлы) → зеркала-прокси
+archive_urls() {
+    local tail="$1"            # например: archive/refs/heads/main.tar.gz
+    printf '%s\n' "https://codeload.github.com/$GITHUB_REPO/tar.gz/refs/heads/$GITHUB_BRANCH"
+    printf '%s\n' "https://github.com/$GITHUB_REPO/$tail"
+    local m
+    for m in $(printf '%s' "$GITHUB_MIRRORS" | tr ',' ' '); do
+        [ -n "$m" ] || continue
+        printf '%shttps://github.com/%s/%s\n' "$m" "$GITHUB_REPO" "$tail"
+        printf '%shttps://codeload.github.com/%s/tar.gz/refs/heads/%s\n' "$m" "$GITHUB_REPO" "$GITHUB_BRANCH"
+    done
+}
+
 bootstrap_self() {
     if [ -n "$ROOT" ] && [ -f "$ROOT/tools/settings.seed.json" ]; then
         cd "$ROOT" || return 1
@@ -189,19 +294,45 @@ bootstrap_self() {
         cd "$CODEMOBILE_SRC" || return 1
         return 0
     fi
-    say "${DIM}Bootstrap: исходников рядом нет — скачиваю репозиторий…${N}"
-    command -v curl >/dev/null 2>&1 || { pkg install -y curl >/dev/null 2>&1; }
-    command -v curl >/dev/null 2>&1 || { err "нет curl — установи: pkg install curl"; return 1; }
-    local tmp; tmp="$(mktemp -d)"
-    if ! curl -fsSL "https://codeload.github.com/$GITHUB_REPO/tar.gz/refs/heads/$GITHUB_BRANCH" \
-            -o "$tmp/repo.tar.gz"; then
-        err "не удалось скачать $GITHUB_REPO ($GITHUB_BRANCH)"
+    # исходники уже скачаны ранее (например, установщиком get.sh) — берём их
+    if [ "$REFRESH_SRC" = 0 ] && [ -f "$SRC_DIR/tools/settings.seed.json" ]; then
+        say "${DIM}Bootstrap: использую ранее скачанные исходники.${N}"
+        cd "$SRC_DIR" || return 1
+        return 0
+    fi
+
+    say "${DIM}Bootstrap: исходников рядом нет — скачиваю архив проекта…${N}"
+    ensure_dl || return 1
+
+    local tmp arc urls u kind
+    tmp="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/codemobile.XXXXXX")" || return 1
+    arc="$tmp/repo.tar.gz"
+    urls="$(archive_urls "archive/refs/heads/$GITHUB_BRANCH.tar.gz")"
+
+    local got=0
+    while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        info "пробую: $u"
+        if cm_download "$u" "$arc" && gzip -t "$arc" >/dev/null 2>&1; then got=1; break; fi
+        warn "не вышло — пробую следующее зеркало…"
+    done <<<"$urls"
+    if [ "$got" != 1 ]; then
+        err "не удалось скачать $GITHUB_REPO ($GITHUB_BRANCH) ни с GitHub, ни с зеркал"
+        rm -rf "$tmp"
         return 1
     fi
-    mkdir -p "$SRC_DIR"
-    tar -xzf "$tmp/repo.tar.gz" -C "$tmp"
-    rm -rf "${SRC_DIR:?}"/*
-    cp -r "$tmp"/*/. "$SRC_DIR/"
+
+    mkdir -p "$SRC_DIR" || { rm -rf "$tmp"; return 1; }
+    tar -xzf "$arc" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+    # в архиве один каталог верхнего уровня: repo-branch
+    local top=""
+    for kind in "$tmp"/*/; do [ -d "$kind" ] && { top="$kind"; break; }; done
+    if [ -z "$top" ] || [ ! -f "$top/install.sh" ]; then
+        err "в архиве нет каталога проекта (ветка $GITHUB_BRANCH верная?)"
+        rm -rf "$tmp"
+        return 1
+    fi
+    cp -R "$top". "$SRC_DIR"/ || { err "не скопировалось в $SRC_DIR"; rm -rf "$tmp"; return 1; }
     rm -rf "$tmp"
     say "${G}✓${N} исходники в $SRC_DIR"
     CODEMOBILE_SRC="$SRC_DIR" exec bash "$SRC_DIR/install.sh" "$@"
@@ -242,9 +373,102 @@ task_pkg() {
     pkg install -y tur-repo || return 1
 }
 
+# ── Зависимости ──────────────────────────────────────────────────────────────
+# Ставим по одному и не валим установку из-за одного пакета: git/unzip нужны
+# только части сценариев, а python и node — для ИИ-ассистента и оформления.
+# Python/node НЕ нужны для скачивания проекта (это делает bootstrap сам).
 task_deps() {
-    pkg install -y python nodejs-lts curl git unzip || return 1
-    node -v; python3 --version
+    local essential="python nodejs-lts curl unzip tar gzip"
+    local optional="git"
+    local p missing=""
+    for p in $essential; do
+        case "$p" in
+            python) command -v python3 >/dev/null 2>&1 && continue ;;
+            nodejs-lts) command -v node >/dev/null 2>&1 && continue ;;
+            *) command -v "$p" >/dev/null 2>&1 && continue ;;
+        esac
+        missing="$missing $p"
+    done
+    if [ -n "$missing" ]; then
+        echo "доставляю:$missing"
+        # shellcheck disable=SC2086
+        pkg install -y $missing || {
+            for p in $missing; do
+                pkg install -y "$p" || echo "[!!] не поставился: $p (продолжаю)"
+            done
+        }
+    fi
+    for p in $optional; do
+        command -v "$p" >/dev/null 2>&1 || pkg install -y "$p" >/dev/null 2>&1 || true
+    done
+    command -v curl >/dev/null 2>&1 || { echo "нет curl — скачивание с зеркал будет недоступно"; }
+    command -v python3 >/dev/null 2>&1 && python3 --version
+    command -v node >/dev/null 2>&1 && node -v
+    return 0
+}
+
+# ── Режим сборки: JDK 21 + нативный aapt2 ────────────────────────────────────
+task_toolchain() {
+    # JDK 21 (AGP 9.x требует 17+). aapt2 ставим ИЗ TERMUX: версия из Maven/SDK
+    # собрана под x86_64 и на телефоне (arm64) не запускается.
+    pkg install -y openjdk-21 aapt2 unzip || return 1
+    command -v java  >/dev/null 2>&1 || { echo "нет java"; return 1; }
+    command -v aapt2 >/dev/null 2>&1 || { echo "нет aapt2"; return 1; }
+    export JAVA_HOME="${JAVA_HOME:-$PREFIX/lib/jvm/java-21-openjdk}"
+    java -version
+    aapt2 version
+}
+
+# ── Режим сборки: Android SDK через sdkmanager из command-line tools ─────────
+task_sdk() {
+    export JAVA_HOME="${JAVA_HOME:-$PREFIX/lib/jvm/java-21-openjdk}"
+    local sm="$SDK_DIR/cmdline-tools/latest/bin/sdkmanager"
+
+    if [ ! -x "$sm" ]; then
+        echo "качаю Android command-line tools…"
+        local tmp; tmp="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/cmdtools.XXXXXX")" || return 1
+        curl -fL --retry 3 -o "$tmp/cmdline.zip" "$CMDLINE_TOOLS_URL" || { rm -rf "$tmp"; return 1; }
+        mkdir -p "$SDK_DIR/cmdline-tools"
+        rm -rf "$SDK_DIR/cmdline-tools/latest" "$SDK_DIR/cmdline-tools/cmdline-tools"
+        unzip -q "$tmp/cmdline.zip" -d "$SDK_DIR/cmdline-tools" || { rm -rf "$tmp"; return 1; }
+        # в архиве каталог верхнего уровня тоже зовётся cmdline-tools → переименуем в latest
+        if [ -d "$SDK_DIR/cmdline-tools/cmdline-tools" ] && [ ! -d "$SDK_DIR/cmdline-tools/latest" ]; then
+            mv "$SDK_DIR/cmdline-tools/cmdline-tools" "$SDK_DIR/cmdline-tools/latest"
+        fi
+        rm -rf "$tmp"
+    fi
+    [ -x "$sm" ] || { echo "sdkmanager не установился"; return 1; }
+
+    yes | "$sm" --sdk_root="$SDK_DIR" --licenses >/dev/null 2>&1 || true
+    "$sm" --sdk_root="$SDK_DIR" "$SDK_PLATFORM" "$SDK_BUILDTOOLS" 2>&1 | tail -n 3
+
+    [ -f "$SDK_DIR/platforms/android-34/android.jar" ] || { echo "нет platforms/android-34/android.jar"; return 1; }
+    [ -x "$SDK_DIR/build-tools/36.0.0/aapt2" ]         || { echo "нет build-tools/36.0.0"; return 1; }
+    echo "SDK готов: $SDK_DIR"
+}
+
+# ── Режим сборки: связать Gradle с SDK и нативным aapt2 ──────────────────────
+task_gradle_config() {
+    printf 'sdk.dir=%s\n' "$SDK_DIR" > local.properties || { echo "не пишется local.properties"; return 1; }
+
+    local aapt2 gp="gradle.properties"
+    aapt2="$(command -v aapt2 || true)"
+    [ -n "$aapt2" ] || { echo "нет aapt2 (pkg install aapt2)"; return 1; }
+    if grep -q '^android\.aapt2FromMavenOverride=' "$gp" 2>/dev/null; then
+        sed -i "s|^android\.aapt2FromMavenOverride=.*|android.aapt2FromMavenOverride=$aapt2|" "$gp"
+    else
+        printf '\n# добавлено CodeMobile: нативный aapt2 (x86_64 из SDK на arm64 не стартует)\nandroid.aapt2FromMavenOverride=%s\n' "$aapt2" >>"$gp"
+    fi
+    echo "sdk.dir=$SDK_DIR"
+    echo "aapt2=$aapt2"
+}
+
+# ── Режим сборки: собрать APK и положить в Download ──────────────────────────
+task_build_apk() {
+    command -v java >/dev/null 2>&1 || { echo "нет java — сначала шаг «набор для сборки»"; return 1; }
+    local dl="${DL_DIR:-$HOME_DIR/storage/shared/Download}" extra=""
+    [ -d "$dl" ] || extra="--no-copy"   # нет доступа к памяти — соберём в app/build
+    bash tools/build_apk.sh --release --allow-existing $extra
 }
 
 task_opencode() {
@@ -292,11 +516,27 @@ NODE
 }
 
 task_zenproxy() {
-    local zen="$HOME_DIR/.zen-proxy"
-    curl -fsSL "https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh" \
-        | ZEN_PROXY_DIR="$zen" bash || return 1
+    local zen="$HOME_DIR/.zen-proxy" tmp u got=0
+    tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/zenproxy.XXXXXX")" || return 1
+    ensure_dl >/dev/null 2>&1 || { rm -f "$tmp"; return 1; }
+    # напрямую + через зеркала (репозиторий zen-proxy — сторонний)
+    for u in "https://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh" \
+             $(printf '%s' "$GITHUB_MIRRORS" | tr ',' '\n' | while read -r m; do
+                  [ -n "$m" ] && printf '%shttps://raw.githubusercontent.com/12errh/zen-proxy/main/install.sh\n' "$m"
+               done); do
+        [ -n "$u" ] || continue
+        if cm_download "$u" "$tmp" && [ -s "$tmp" ]; then got=1; break; fi
+    done
+    if [ "$got" = 1 ] && ZEN_PROXY_DIR="$zen" bash "$tmp"; then
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"
+        echo "[!!] zen-proxy не встал (недоступен GitHub/зеркала) — бесплатные модели"
+        echo "     из OpenCode Zen подключатся позже: codemobile update && bash install.sh"
+    fi
     [ -f "$zen/zen-proxy.json" ] || install_file tools/zen-proxy.json.seed "$zen/zen-proxy.json" 644
     echo "zen-proxy: $zen"
+    return 0
 }
 
 task_codeserver() {
@@ -345,6 +585,11 @@ task_shortcuts() {
 task_design() {
     local settings="$HOME_DIR/.local/share/code-server/User/settings.json"
     local ms="$HOME_DIR/.local/share/codemobile/merge_settings.py"
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "[!!] python3 не установлен — оформление пропущено"
+        echo "     поставь и повтори: pkg install python && bash install.sh"
+        return 0
+    fi
     if [ -f "$ms" ]; then
         python3 "$ms" tools/settings.seed.json "$settings"
     else
@@ -361,16 +606,24 @@ task_apk() {
                 app/build/outputs/apk/debug/app-debug.apk; do
         [ -n "$cand" ] && [ -f "$cand" ] && { apk="$cand"; break; }
     done
-    # 2) последний релиз на GitHub
+    # 2) последний релиз на GitHub (напрямую, затем через зеркала)
     if [ -z "$apk" ]; then
-        local url
-        url="$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/latest" 2>/dev/null \
-               | grep -oE '"browser_download_url":[[:space:]]*"[^"]+\.apk"' \
-               | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')"
+        local url="" api
+        for api in "https://api.github.com/repos/$GITHUB_REPO/releases/latest" \
+                   $(printf '%s' "$GITHUB_MIRRORS" | tr ',' '\n' | while read -r m; do
+                        [ -n "$m" ] && printf '%s%s\n' "$m" "https://api.github.com/repos/$GITHUB_REPO/releases/latest"
+                     done); do
+            [ -n "$api" ] || continue
+            url="$(cm_download "$api" "$HOME_DIR/.cache/codemobile-release.json" >/dev/null 2>&1 \
+                   && grep -oE '"browser_download_url":[[:space:]]*"[^"]+\.apk"' "$HOME_DIR/.cache/codemobile-release.json" \
+                   | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')"
+            [ -n "$url" ] && break
+        done
         if [ -n "$url" ]; then
             apk="$dl/CodeMobile-latest.apk"
             echo "качаю APK: $url"
-            curl -fsSL "$url" -o "$apk" || apk=""
+            ensure_dl >/dev/null 2>&1
+            cm_download "$url" "$apk" >/dev/null 2>&1 || apk=""
         fi
     fi
     if [ -z "$apk" ] || [ ! -f "$apk" ]; then
@@ -380,16 +633,26 @@ task_apk() {
     fi
     ok "APK: $apk ($(du -h "$apk" | cut -f1))"
     if [ "$DRY" = 1 ]; then info "[dry] запустил бы установку $apk"; return 0; fi
-    if command -v pm >/dev/null 2>&1 \
+    # 1) pm — сработает, только если у Termux есть shell-права (root/Shizuku/adb).
+    #    На стоковом Android это обычно НЕ так, поэтому проверяем результат по факту.
+    if command -v pm >/dev/null 2>&1 && pm install -r "$apk" >/dev/null 2>&1 \
         && pm list packages 2>/dev/null | grep -q "^package:$PKG_APP\$"; then
-        : # уже установлен — обновим ниже при наличии pm
+        ok "APK установлен через pm (иконка появится в меню)"
+        return 0
     fi
-    if command -v pm >/dev/null 2>&1 && pm install -r "$apk" >/dev/null 2>&1; then
-        ok "APK установлен через pm (приложение появится в меню)"
-    else
-        echo "открываю установщик Android — подтверди установку (нужен доступ Termux на установку приложений)"
-        command -v termux-open >/dev/null 2>&1 && termux-open "$apk" || echo "поставь вручную: $apk"
+    # 2) системный установщик Android — нужен доступ Termux «Установка приложений»
+    echo "pm не смог (нет shell-прав) — открываю системный установщик Android."
+    if command -v termux-open >/dev/null 2>&1; then
+        termux-open "$apk"
+        echo "Подтверди установку на экране телефона."
+        echo "Нет окна? Разреши Termux установку приложений и повтори: termux-open \"$apk\""
     fi
+    # 3) запасные пути без root
+    echo "Другие способы:"
+    echo "  • открыть файл из папки Download в файловом менеджере: $apk"
+    echo "  • через Shizuku:   rish pm install -r \"$apk\""
+    echo "  • с компьютера:    adb install -r \"$apk\""
+    return 0
 }
 
 task_doctor() {
@@ -424,6 +687,7 @@ else
     WANT_DESIGN=0
 fi
 [ "$WANT_APK" = 2 ] && { ask_yn "Скачать и установить APK-лаунчер (иконка «VS Code» на телефоне)?" Y && WANT_APK=1 || WANT_APK=0; }
+[ "$WANT_BUILD" = 2 ] && { ask_yn "Собрать APK прямо в Termux? (JDK + Android SDK ≈ 1 ГБ, для разработки)" N && WANT_BUILD=1 || WANT_BUILD=0; }
 [ "$WANT_HINTS" = 1 ] && { ask_yn "Показать подсказки Xiaomi/Shizuku (чтобы фон не убивался)?" Y || WANT_HINTS=0; }
 say ""
 
@@ -433,6 +697,10 @@ add() { STEPS+=("$2"); LABELS+=("$1"); }
 
 add "Базовые пакеты (tur-repo, python, node, git…)" task_pkg
 add "Зависимости" task_deps
+[ "$WANT_BUILD" = 1 ]    && add "Набор для сборки: JDK 21 + aapt2" task_toolchain
+[ "$WANT_BUILD" = 1 ]    && add "Android SDK (платформа 34, build-tools 36)" task_sdk
+[ "$WANT_BUILD" = 1 ]    && add "Настройка SDK и aapt2 для Gradle" task_gradle_config
+[ "$WANT_BUILD" = 1 ]    && add "Сборка APK в Termux" task_build_apk
 [ "$WANT_OPENCODE" = 1 ] && add "OpenCode (ИИ-ассистент)" task_opencode
 [ "$WANT_MODELS" = 1 ]   && add "Бесплатные модели: конфиг OpenCode" task_opencode_config
 [ "$WANT_MODELS" = 1 ]   && add "Бесплатные модели: Zen-Proxy" task_zenproxy
@@ -476,6 +744,7 @@ say "  • Телефон: открой иконку «VS Code» — серви�
 say "  • Терминал: ${C}codemobile start|stop|status|doctor|models|logs${N}"
 say "  • ИИ-ассистент: в VS Code встроенный терминал → ${C}opencode${N} (Tab — переключение агента)."
 say "  • Пароль code-server: ${C}cat ~/.config/code-server/config.yaml${N}"
+[ "$WANT_BUILD" = 1 ] && say "  • Сборка из исходников: ${C}codemobile build${N} → APK в Download/CodeMobile-<версия>.apk"
 say ""
 say "${DIM}После установки выполни: termux-reload-settings${N}"
 

@@ -34,7 +34,7 @@ jobs:
           [ -n "$SM" ] || SM="$(command -v sdkmanager || true)"
           if [ -n "$SM" ]; then
             yes | "$SM" --licenses >/dev/null 2>&1 || true
-            "$SM" "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+            "$SM" "platform-tools" "platforms;android-34" "build-tools;36.0.0" >/dev/null 2>&1 || true
           fi
 
       - name: Disable Termux aapt2 override (CI — обычный x86_64)

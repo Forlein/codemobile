@@ -5,8 +5,7 @@ plugins {
 android {
     namespace 'com.example.opencodelauncher'
     compileSdk 34
-    // В Termux распакован ровно этот build-tools — не даём AGP качать другой.
-    buildToolsVersion '34.0.0'
+    buildToolsVersion '36.0.0'
 
     defaultConfig {
         applicationId 'com.example.opencodelauncher'

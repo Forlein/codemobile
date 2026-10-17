@@ -1,0 +1,229 @@
+# Установка CodeMobile — подробная инструкция
+
+VS Code + ИИ‑ассистент OpenCode в кармане, **без ПК и без root**.
+Короткая версия — в [README](README.md); здесь — все варианты, флаги и лечение
+ошибок.
+
+---
+
+## 0. Что понадобится
+
+| Что | Зачем | Где брать |
+|---|---|---|
+| **Termux** | среда, в которой живут VS Code и OpenCode | **F‑Droid** или [GitHub Releases](https://github.com/termux/termux-app/releases) — **не Play Маркет** |
+| Интернет | скачать пакеты и проект | — |
+| ~1.5 ГБ места | code-server (~500 МБ) + OpenCode (~200 МБ) + Node | — |
+| Android 7.0+ | minSdk приложения | — |
+
+**Git и Python заранее не нужны.** Установщик сам определит, чем качать
+(`curl` → `wget` → `python3` → `node`), сам доставит недостающее
+(`python`, `nodejs`, `unzip`) через `pkg` и сам скачает проект.
+
+---
+
+## 1. Быстрая установка (рекомендуется)
+
+**Шаг 1.** Открой Termux.
+
+**Шаг 2.** Вставь одну строку и нажми Enter:
+
+```bash
+pkg install -y curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/get.sh)"
+```
+
+**Шаг 3.** Ответь на вопросы (Enter = «да») и дождись прогресс‑бара:
+
+```
+  [████████████░░░░░░░░░░░░░░░]  47%  VS Code в браузере (code-server)
+```
+
+**Шаг 4.** В конце поставь APK‑лаунчер (иконка **VS Code**) — установщик скачает
+его из Releases и откроет системный установщик Android.
+
+**Шаг 5.** В Termux выполни один раз:
+
+```bash
+termux-reload-settings
+```
+
+Готово: иконка **VS Code** на телефоне, редактор на `http://127.0.0.1:8080`.
+
+Без вопросов, всё по умолчанию:
+
+```bash
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/get.sh)" -y
+```
+
+---
+
+## 2. Что именно делает `get.sh`
+
+| Этап | Действие | Можно отключить |
+|---|---|---|
+| 1 | проверяет, что это Termux; иначе показывает, что скачать | — |
+| 2 | выбирает загрузчик: `curl` → `wget` → `python3` → `node` | — |
+| 3 | доставляет `curl`, `python`, `nodejs-lts`, `unzip` | `--no-deps` |
+| 4 | скачивает архив проекта: GitHub, затем зеркала | `--direct` |
+| 5 | распаковывает в `~/.local/share/codemobile/src` | `--src DIR` |
+| 6 | запускает `install.sh` (меню + прогресс) | `--no-run` |
+
+Если исходники уже скачаны, шаг 4 пропускается (мгновенный повторный запуск);
+перекачать заново — `--update`.
+
+### Флаги `get.sh`
+
+```text
+-y, --yes          передать install.sh: без вопросов
+--repo OWNER/REPO  другой репозиторий (форк)
+--branch NAME      ветка или тег (по умолчанию main)
+--src DIR          куда распаковать исходники
+--mirror URL       добавить зеркало (можно несколько раз)
+--direct           только GitHub, без зеркал
+--zip              качать zip вместо tar.gz
+--update           перекачать исходники
+--no-deps          не доставлять пакеты
+--no-run           только скачать, установщик не запускать
+--print-url        показать адреса загрузки и выйти
+-h, --help
+
+Любой другой флаг уходит в install.sh:
+  --yes --no-apk --no-opencode --no-models --no-code-server --no-design
+  --build --dry --refresh --mirror URL
+```
+
+### Переменные окружения
+
+```bash
+CODEMOBILE_REPO=owner/repo         # свой репозиторий
+CODEMOBILE_BRANCH=dev              # своя ветка/тег
+CODEMOBILE_SRC=~/cm/src            # каталог исходников
+CODEMOBILE_MIRRORS="https://ghproxy.net/,https://gh-proxy.com/"
+CODEMOBILE_APK=~/Download/CodeMobile.apk   # свой APK для установки
+```
+
+---
+
+## 3. Если GitHub недоступен или очень медленный
+
+`get.sh` и `install.sh` умеют качать через зеркала‑прокси:
+`ghproxy.net`, `gh-proxy.com`, `ghfast.top`, а одиночные файлы — ещё и через
+быстрый CDN **jsDelivr**. Перебор идёт автоматически: не вышло на GitHub —
+пробуется следующее зеркало.
+
+Свой вариант:
+
+```bash
+# 1) скачать сам установщик через jsDelivr
+sh -c "$(curl -fsSL https://cdn.jsdelivr.net/gh/Forlein/codemobile@main/get.sh)"
+
+# 2) или указать зеркало вручную
+sh get.sh --mirror https://ghproxy.net/ -y
+
+# 3) или подставить цепочку зеркал
+CODEMOBILE_MIRRORS="https://ghproxy.net/,https://gh-proxy.com/" sh get.sh -y
+```
+
+Посмотреть все адреса, по которым установщик будет пробовать качать:
+
+```bash
+sh get.sh --print-url
+```
+
+### Установка вообще без установщика
+
+Скачай архив на телефоне (браузер → страница репозитория → **Code → Download ZIP**)
+или любым менеджером загрузок, распакуй и запусти:
+
+```bash
+cd ~/codemobile-main       # каталог из архива
+bash install.sh            # или: bash install.sh -y
+```
+
+Тот же результат даёт `git`, если он есть:
+
+```bash
+pkg install -y git
+git clone https://github.com/Forlein/codemobile && cd codemobile && bash install.sh
+```
+
+---
+
+## 4. Обновление и повторная установка
+
+```bash
+codemobile upgrade         # скачать свежие исходники и повторить установку
+codemobile upgrade -y      # без вопросов
+codemobile update          # обновить пакеты (code-server, opencode2, node, python)
+codemobile build           # пересобрать APK на телефоне (после install.sh --build)
+```
+
+Установщик идемпотентный: повторный запуск ничего не ломает, настройки
+`settings.json`/`opencode.json` мержатся (создаются `.bak-install` копии),
+пароль code-server и данные приложения сохраняются.
+
+Просто переустановить поверх:
+
+```bash
+sh get.sh --update -y
+```
+
+---
+
+## 5. Сборка APK прямо на телефоне (режим разработчика)
+
+```bash
+sh get.sh --no-run                     # только исходники (git не нужен)
+cd ~/.local/share/codemobile/src
+bash install.sh --build                # JDK 21 + aapt2 + Android SDK + сборка
+```
+
+Дальше:
+
+```bash
+codemobile build                       # → Download/CodeMobile-<версия>.apk
+bash tools/build_apk.sh --release      # то же самое напрямую
+```
+
+Флаги `tools/build_apk.sh`: `--debug` (по умолчанию debug), `--release`,
+`--offline` (без сети, из кэша Gradle), `--no-copy`, `--allow-existing`,
+`--keep=N` (оставить в Download N последних APK).
+
+Требуется ~1 ГБ свободного места: JDK 21, Android SDK (платформа 34,
+build‑tools 36.0.0) и Gradle‑кэш. Первая сборка идёт с сетью.
+
+---
+
+## 6. Если что-то не так
+
+| Симптом | Причина | Решение |
+|---|---|---|
+| `pkg: command not found` | это не Termux (или Termux из Play Маркета) | поставить Termux с F‑Droid/GitHub и открыть заново |
+| `не удалось скачать архив ни с GitHub, ни с зеркал` | нет сети / блокировка | `sh get.sh --mirror https://ghproxy.net/`; проверить сеть; попробовать `--zip` |
+| `python3 нет — часть шагов пропустится` | нет python | `pkg install python` и повторить `bash install.sh` |
+| Долго `code-server` не отвечает | сервис ещё поднимается / упал | `codemobile start`, затем `codemobile status`; лог `~/.cache/opencodelauncher/code-server.log` |
+| Бесконечное «подключение» в приложении | не включён `allow-external-apps` | `bash install.sh` (сам допишет) → `termux-reload-settings` |
+| Всё «пропадает» в фоне | phantom process killer (Android 12+) | выключить через Shizuku — см. `codemobile doctor` |
+| Нет бесплатных моделей | `zen-proxy` не поднят | `codemobile start`, потом `codemobile models` |
+| Не ставится APK | нет разрешения «Установка приложений» | Настройки → Приложения → Termux → Установка приложений → Разрешить; либо открой файл из `Download/` |
+| `Permission denied` на `/storage/emulated/0` | нет доступа к памяти | `termux-setup-storage`; HyperOS: разрешение «Файлы и медиа → Управление всеми файлами» |
+| Termux убивается в фоне (Xiaomi) | агрессивная экономия | Автозапуск ВКЛ, «Без ограничений» по батарее, замок на карточке в недавних |
+
+Диагностика одной командой:
+
+```bash
+codemobile doctor
+```
+
+---
+
+## 7. Удаление
+
+```bash
+codemobile stop                    # погасить сервисы
+rm -rf ~/.local/share/codemobile   # исходники и служебные файлы
+rm -f  ~/.shortcuts/OpenCode-*     # скрипты запуска
+rm -f  ~/.local/bin/codemobile     # CLI (или: rm -f $PREFIX/bin/codemobile)
+pkg uninstall code-server opencode2 # сами пакеты (по желанию)
+```
+
+APK‑лаунчер удаляется обычным способом: долгий тап по иконке → «Удалить».

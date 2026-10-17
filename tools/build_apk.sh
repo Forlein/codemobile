@@ -13,8 +13,14 @@
 #   bash tools/build_apk.sh            # assembleDebug → Download
 #   bash tools/build_apk.sh --release  # assembleRelease → Download
 #   bash tools/build_apk.sh --no-copy  # только собрать, никуда не класть
+#   bash tools/build_apk.sh --offline  # только из кэша Gradle (без сети)
+#   bash tools/build_apk.sh --allow-existing  # не ругаться, если файл уже в Download
 #   bash tools/build_apk.sh --keep=5   # и подчистить Download, оставив
 #                                      #   5 последних версий (по умолчанию не чистит)
+#
+# На первой сборке нужна сеть (Gradle тянет плагин Android и зависимости),
+# поэтому по умолчанию Gradle НЕ в offline-режиме. Ускорить повторную сборку
+# без сети: --offline.
 #
 # Коды выхода: 0 — ок, 1 — ошибка.
 # =============================================================================
@@ -25,14 +31,18 @@ GRADLE_TASK="assembleDebug"
 APK_SUB="debug"
 DO_COPY=1
 KEEP=0
+GRADLE_FLAGS=""      # по умолчанию с сетью: на первой сборке Gradle качает плагин и зависимости
+ALLOW_EXISTING=0     # --allow-existing: не падать, если файл с этой версией уже в Download
 
 for a in "$@"; do
     case "$a" in
         --release)  GRADLE_TASK="assembleRelease"; APK_SUB="release" ;;
         --debug)    GRADLE_TASK="assembleDebug";   APK_SUB="debug" ;;
         --no-copy)  DO_COPY=0 ;;
+        --offline)  GRADLE_FLAGS="--offline" ;;
+        --allow-existing) ALLOW_EXISTING=1 ;;
         --keep=*)   KEEP="${a#--keep=}" ;;
-        -h|--help)  sed -n '2,19p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)  sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "неизвестный флаг: $a (см. --help)" >&2; exit 2 ;;
     esac
 done
@@ -51,7 +61,7 @@ OUT="$ROOT/app/build/outputs/apk/$APK_SUB/app-$APK_SUB.apk"
 DEST="$DL_DIR/CodeMobile-$VERSION.apk"
 
 echo "== Сборка CodeMobile $VERSION ($GRADLE_TASK)"
-( cd "$ROOT" && ./gradlew ":app:$GRADLE_TASK" --offline -q )
+( cd "$ROOT" && ./gradlew ":app:$GRADLE_TASK" $GRADLE_FLAGS -q )
 RC=$?
 if [ "$RC" != 0 ] || [ ! -f "$OUT" ]; then
     echo "[XX] сборка не удалась (code $RC) или нет $OUT" >&2
@@ -66,12 +76,17 @@ if [ "$DO_COPY" = 1 ]; then
         exit 1
     fi
     if [ -f "$DEST" ]; then
-        echo "[!!] $DEST уже существует — НЕ перезаписываю." >&2
-        echo "     Подними versionName в app/build.gradle и собери снова." >&2
-        exit 1
+        if [ "$ALLOW_EXISTING" = 1 ]; then
+            echo "  [= ] $DEST уже существует — оставляю как есть"
+        else
+            echo "[!!] $DEST уже существует — НЕ перезаписываю." >&2
+            echo "     Подними versionName в app/build.gradle и собери снова." >&2
+            exit 1
+        fi
+    else
+        cp "$OUT" "$DEST" || { echo "[XX] не удалось скопировать в $DEST" >&2; exit 1; }
+        echo "  [ok] $DEST"
     fi
-    cp "$OUT" "$DEST" || { echo "[XX] не удалось скопировать в $DEST" >&2; exit 1; }
-    echo "  [ok] $DEST"
 fi
 
 # --- необязательная чистка Download ---------------------------------------

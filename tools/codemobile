@@ -10,6 +10,8 @@
 #   codemobile models    обновить список бесплатных моделей zen-proxy в конфиге OpenCode
 #   codemobile logs      хвост логов сервисов
 #   codemobile update    обновить пакеты (code-server / opencode2)
+#   codemobile upgrade   обновить сам проект (исходники + скрипты установщиком)
+#   codemobile build     собрать APK из исходников (нужен режим install.sh --build)
 #   codemobile help
 # =============================================================================
 set -uo pipefail
@@ -180,6 +182,56 @@ cmd_update() {
     c_ok "Обновление завершено."
 }
 
+cmd_build() {
+    # исходники: либо текущая папка, либо распакованные установщиком
+    local src=""
+    if [ -f "./tools/build_apk.sh" ]; then
+        src="$(pwd)"
+    elif [ -f "${CODEMOBILE_SRC:-$HOME_DIR/.local/share/codemobile/src}/tools/build_apk.sh" ]; then
+        src="${CODEMOBILE_SRC:-$HOME_DIR/.local/share/codemobile/src}"
+    fi
+    [ -n "$src" ] || { c_err "нет исходников — сначала: bash install.sh --build"; exit 1; }
+    [ -f "$src/gradle.properties" ] || { c_err "в $src нет Android-проекта"; exit 1; }
+    c_dim "→ сборка в $src (tools/build_apk.sh)"
+    ( cd "$src" && bash tools/build_apk.sh --release --allow-existing "$@" )
+}
+
+# codemobile upgrade [флаги install.sh] — обновить сам CodeMobile:
+# скачивает свежий get.sh (GitHub → зеркала) и запускает установщик заново,
+# поэтому обновляются и скрипты, и зависимости, и оформление. Данные не теряются.
+cmd_upgrade() {
+    local repo="${CODEMOBILE_REPO:-Forlein/codemobile}"
+    local br="${CODEMOBILE_BRANCH:-main}"
+    local mirrors="${CODEMOBILE_MIRRORS:-https://ghproxy.net/,https://gh-proxy.com/,https://ghfast.top/}"
+    local tmp url ok=0
+    tmp="$(mktemp "${TMPDIR:-$PREFIX/tmp}/codemobile-get.XXXXXX")" || exit 1
+    for url in "https://raw.githubusercontent.com/$repo/$br/get.sh" \
+               "https://cdn.jsdelivr.net/gh/$repo@$br/get.sh" \
+               $(printf '%s' "$mirrors" | tr ',' '\n' | while read -r m; do
+                     [ -n "$m" ] && printf '%shttps://raw.githubusercontent.com/%s/%s/get.sh\n' "$m" "$repo" "$br"
+                 done); do
+        [ -n "$url" ] || continue
+        c_dim "→ пробую: $url"
+        if command -v curl >/dev/null 2>&1; then
+            curl -fsSL --connect-timeout 20 -o "$tmp" "$url" 2>/dev/null && [ -s "$tmp" ] && { ok=1; break; }
+        elif command -v wget >/dev/null 2>&1; then
+            wget -q -O "$tmp" "$url" && [ -s "$tmp" ] && { ok=1; break; }
+        elif command -v python3 >/dev/null 2>&1; then
+            python3 -c 'import sys,urllib.request as u; open(sys.argv[2],"wb").write(u.urlopen(u.Request(sys.argv[1],headers={"User-Agent":"CodeMobile"}),timeout=60).read())' "$url" "$tmp" 2>/dev/null \
+                && [ -s "$tmp" ] && { ok=1; break; }
+        else
+            c_err "нет curl/wget/python3 — поставь: pkg install curl"; rm -f "$tmp"; exit 1
+        fi
+    done
+    [ "$ok" = 1 ] || { c_err "get.sh не скачался (GitHub/зеркала недоступны)"; rm -f "$tmp"; exit 1; }
+    c_ok "→ запускаю обновление проекта…"
+    sh "$tmp" --update "$@"
+    local rc=$?
+    rm -f "$tmp"
+    [ "$rc" = 0 ] && c_ok "CodeMobile обновлён." || c_warn "обновление завершилось с замечаниями (см. выше)."
+    return $rc
+}
+
 case "${1:-status}" in
     start|up)     cmd_start ;;
     stop|down)    shift; cmd_stop "$@" ;;
@@ -189,8 +241,10 @@ case "${1:-status}" in
     models)       cmd_models ;;
     logs)         shift; cmd_logs "$@" ;;
     update)       cmd_update ;;
+    upgrade|self-update) shift; cmd_upgrade "$@" ;;
+    build)        shift; cmd_build "$@" ;;
     help|-h|--help)
-        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
-        c_err "неизвестная команда: $1"; echo; sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        c_err "неизвестная команда: $1"; echo; sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

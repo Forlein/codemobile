@@ -33,22 +33,58 @@
 * **Termux** — ставить с **F‑Droid** (версия из Play Store устарела и не подходит)
 * ~1.5 ГБ свободного места (code-server ~500 МБ + OpenCode ~200 МБ + Node)
 * Интернет при установке (пакеты и, при желании, APK из релиза)
+* **Git не нужен.** Для установки достаточно одного из: `curl`, `wget`, `python3`
+  или `node` — установщик сам подберёт, чем качать, и сам доставит остальное.
 
 ---
 
 ## Установка — одна команда
 
-Открой Termux и вставь:
+**Шаг 1.** Поставь **Termux** — только с **F‑Droid** или
+[GitHub](https://github.com/termux/termux-app/releases) (версия из Play Маркета
+устарела и не подходит).
+
+**Шаг 2.** Открой Termux и вставь **одну строку** — дальше всё делает установщик:
 
 ```bash
-pkg install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/install.sh)
+pkg install -y curl && sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/get.sh)"
 ```
 
-Появится меню (можно просто жать **Enter**), затем прогресс‑бар:
+`get.sh` — это установщик‑загрузчик: он **не требует git и python**. Он сам
+выясняет, чем качать (`curl` → `wget` → `python3` → `node`), при необходимости
+сам доставляет `python`, `node`, `unzip` (сообщив, что и зачем), скачивает
+проект (GitHub, а при сбое — зеркала), распаковывает в
+`~/.local/share/codemobile/src` и только потом запускает `install.sh`.
+
+**Шаг 3.** Ответь на пару вопросов (можно просто жать **Enter**) — появится меню,
+затем прогресс‑бар:
 
 ```
   [████████░░░░░░░░░░░░░░░░░░]  33%  Устанавливаю VS Code в браузере…
 ```
+
+В самом конце поставь APK‑лаунчер (иконка **«VS Code»**) — или скачай
+`CodeMobile-*.apk` из [Releases](../../releases) и открой его.
+
+### Если GitHub недоступен или тормозит
+
+Установщик сам перебирает зеркала (`ghproxy.net`, `gh-proxy.com`, `ghfast.top`)
+и, когда `raw.githubusercontent.com` не отвечает, качает исходники через них.
+Своё зеркало можно задать руками:
+
+```bash
+# скачать сам установщик через зеркало
+sh -c "$(curl -fsSL https://cdn.jsdelivr.net/gh/Forlein/codemobile@main/get.sh)"
+
+# или явно указать зеркало для исходников
+sh get.sh --mirror https://ghproxy.net/ -y
+
+# вообще без зеркал (только GitHub)
+sh get.sh --direct
+```
+
+Переменная `CODEMOBILE_MIRRORS` задаёт список зеркал через запятую, а
+`CODEMOBILE_REPO`/`CODEMOBILE_BRANCH` — свой форк и ветку.
 
 ### Что спросит установщик
 
@@ -59,16 +95,40 @@ pkg install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Forle
 | **VS Code в браузере (code-server)?** | ставит сервер VS Code |
 | ↳ **оформление?** | применяет дизайн (матовая прозрачность, шрифты, курсор) |
 | **APK‑лаунчер?** | скачивает APK из **Releases** и ставит иконку на телефон |
+| **собрать APK в Termux?** | режим разработчика: JDK + Android SDK и сборка APK на телефоне |
 | **подсказки Xiaomi/Shizuku?** | инструкции, чтобы Android не убивал фон |
 
-Флаги для «неинтерактивно»: `--yes`, `--no-apk`, `--no-opencode`,
-`--no-models`, `--no-code-server`, `--no-design`, `--dry` (см. `--help`).
+Флаги: `--yes`, `--no-apk`, `--no-opencode`, `--no-models`,
+`--no-code-server`, `--no-design`, `--build`, `--dry`, `--mirror URL`,
+`--refresh` (см. `--help`).
 
 Всё сразу, без вопросов:
 
 ```bash
-pkg install -y curl && bash <(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/install.sh) -y
+sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/get.sh)" -y
 ```
+
+Флаги `get.sh`: `--no-run` (только скачать исходники), `--update` (перекачать),
+`--src DIR`, `--zip`, `--no-deps`, `--print-url` — подробнее в `sh get.sh --help`
+и в [INSTALL.md](INSTALL.md).
+
+### Установка без сети‑затей: из архива вручную
+
+Скачай zip/tar.gz со страницы репозитория (Code → **Download ZIP**), распакуй в
+Termux и запусти:
+
+```bash
+cd ~/codemobile-main && bash install.sh
+```
+
+### Обновление проекта
+
+```bash
+codemobile upgrade          # скачает свежие исходники и повторит установку
+codemobile upgrade -y       # без вопросов
+```
+
+Данные приложения, пароль code-server и настройки не теряются.
 
 ### Доступ к файлам Termux (чтобы не ругался)
 
@@ -112,7 +172,8 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
 ### Что именно скачивается и ставится
 
 1. **tur-repo** — репозиторий Termux с нужными пакетами;
-2. **python, nodejs, curl, git, unzip** — зависимости;
+2. **python, nodejs, curl, unzip** — зависимости (git — по желанию, для разработки);
+   их можно не ставить: сам проект уже скачан установщиком `get.sh`;
 3. **opencode2** — ИИ‑ассистент (пакет Termux); плюс наш враппер (`--standalone`);
 4. **openkilo** (плагин OpenCode) — 40+ бесплатных моделей Kilo Gateway, без ключа;
 5. **zen-proxy** (`github.com/12errh/zen-proxy`) — локальный прокси `:8787` к
@@ -139,6 +200,8 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
   codemobile doctor      # поиск ошибок и подсказки по решению
   codemobile models     # обновить список бесплатных моделей
   codemobile logs       # хвост логов
+  codemobile upgrade    # обновить сам проект (исходники + скрипты)
+  codemobile build      # собрать APK на телефоне (после install.sh --build)
   ```
 
 * **ИИ‑ассистент:** в VS Code открой терминал и запусти `opencode`.
@@ -168,7 +231,27 @@ tail -f ~/.cache/opencodelauncher/watch.log
 
 ## Сборка APK из исходников
 
-Нужны Android SDK (compileSdk 34, build‑tools 34.0.0), JDK 17+ и `pkg install aapt2`.
+### На телефоне (без ПК)
+
+```bash
+sh get.sh --no-run          # только скачать исходники (git не нужен)
+cd ~/.local/share/codemobile/src
+bash install.sh --build     # JDK 21 + aapt2 + Android SDK и сборка APK
+```
+
+Дальше пересобирать можно одной командой:
+
+```bash
+codemobile build            # → Download/CodeMobile-<версия>.apk
+```
+
+Скрипт сам доставит Android SDK (платформа 34, build‑tools 36.0.0), подставит
+нативный `aapt2` из Termux (сборка из Maven собрана под x86_64 и на телефоне не
+запускается) и запишет `sdk.dir` в `local.properties`.
+
+### На ПК / в CI
+
+Нужны Android SDK (compileSdk 34, build‑tools 36.0.0) и JDK 17+.
 
 ```bash
 git clone https://github.com/Forlein/codemobile && cd codemobile
@@ -176,7 +259,14 @@ bash tools/build_apk.sh --release     # соберёт и положит CodeMob
 ```
 
 > В `gradle.properties` задан `android.aapt2FromMavenOverride` для Termux.
-> При сборке на ПК/CI его нужно очистить (`-Pandroid.aapt2FromMavenOverride=`).
+> На ПК/CI его нужно очистить (`-Pandroid.aapt2FromMavenOverride=`), иначе Gradle
+> возьмёт чужой `aapt2`.
+
+Полезные флаги `tools/build_apk.sh`: `--release`, `--debug`, `--offline`
+(только из кэша Gradle), `--no-copy` (не копировать в Download),
+`--allow-existing` (не ругаться, если такая версия уже лежит), `--keep=N`
+(чистить Download, оставив N последних). Первая сборка требует сети: Gradle
+скачивает плагин Android и зависимости.
 
 ---
 
@@ -184,12 +274,14 @@ bash tools/build_apk.sh --release     # соберёт и положит CodeMob
 
 ```
 codemobile/
-├── install.sh              # загрузчик «одной командой» (меню + прогресс + doctor)
+├── get.sh                  # установщик-загрузчик: скачает проект и запустит install.sh
+├── install.sh              # установщик «одной командой» (меню + прогресс + doctor)
+├── INSTALL.md              # подробная инструкция по установке и решению проблем
 ├── app/                    # Android-приложение (WebView-обёртка)
 ├── tools/
 │   ├── shortcuts/          # OpenCode-All / Stop / Watch (поднимают и стерегут сервисы)
 │   ├── opencode2           # враппер OpenCode
-│   ├── codemobile          # CLI (start/stop/status/doctor/models/logs)
+│   ├── codemobile          # CLI (start/stop/status/doctor/models/logs/upgrade/build)
 │   ├── settings.seed.json  # оформление для settings.json code-server
 │   ├── opencode.json.seed  # конфиг OpenCode с бесплатными моделями
 │   ├── zen-proxy.json.seed # конфиг zen-proxy
