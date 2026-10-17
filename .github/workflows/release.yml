@@ -1,0 +1,54 @@
+name: Release APK
+
+# Собирает APK и публикует его в Releases при пуше тега вида vX.Y или vX.Y.Z.
+# Запустить вручную можно из вкладки Actions (workflow_dispatch).
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Disable Termux aapt2 override (CI — обычный x86_64)
+        run: sed -i 's|^android.aapt2FromMavenOverride=.*|# override отключён в CI|' gradle.properties
+
+      - name: Build release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:assembleRelease --no-daemon
+
+      - name: Rename artifact
+        run: |
+          cp app/build/outputs/apk/release/app-release.apk \
+             "CodeMobile-${GITHUB_REF_NAME}.apk"
+
+      - name: Publish to Releases
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: CodeMobile-*.apk
+          generate_release_notes: true
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: CodeMobile-apk
+          path: CodeMobile-*.apk
