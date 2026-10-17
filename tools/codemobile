@@ -12,6 +12,7 @@
 #   codemobile update    обновить пакеты (code-server / opencode2)
 #   codemobile upgrade   обновить сам проект (исходники + скрипты установщиком)
 #   codemobile build     собрать APK из исходников (нужен режим install.sh --build)
+#   mem helper           вписать Zen-ключ для бесплатных моделей (по шагам)
 #   codemobile help
 # =============================================================================
 set -uo pipefail
@@ -102,11 +103,16 @@ const port = process.argv[3];
     .map(m => m.id || m.name).filter(Boolean).sort();
   let cfg = {};
   if (fs.existsSync(cfgPath)) {
-    // мягкий парсинг (срезаем // комментарии и висячие запятые)
-    let t = fs.readFileSync(cfgPath, "utf8")
-      .replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "")
-      .replace(/,(\s*[}\]])/g, "$1");
-    cfg = JSON.parse(t);
+    // сначала обычный JSON (в конфиге есть URL https://…), затем — мягкий разбор
+    const raw = fs.readFileSync(cfgPath, "utf8");
+    try { cfg = JSON.parse(raw); }
+    catch {
+      try {
+        cfg = JSON.parse(
+          raw.replace(/^\s*\/\/[^\n]*/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")
+             .replace(/,(\s*[}\]])/g, "$1"));
+      } catch { cfg = {}; }
+    }
   }
   cfg.provider = cfg.provider || {};
   const models = {};
@@ -149,6 +155,22 @@ cmd_doctor() {
         || { c_warn "  [fix] нет python3 → pkg install python"; problems=$((problems+1)); }
     command -v code-server >/dev/null 2>&1 && c_ok "  code-server есть" \
         || { c_warn "  [fix] нет code-server → pkg install tur-repo && pkg install code-server"; problems=$((problems+1)); }
+    # Zen-ключ бесплатных моделей (zen-proxy)
+    local zc=""
+    for d in "$HOME_DIR/.zen-proxy" "$HOME_DIR/zen-proxy"; do
+        [ -f "$d/zen-proxy.json" ] && { zc="$d/zen-proxy.json"; break; }
+    done
+    if [ -n "$zc" ]; then
+        if node -e 'const fs=require("fs");try{const c=JSON.parse(fs.readFileSync(process.argv[1],"utf8"));process.exit(c.defaultZenKey?0:1)}catch{process.exit(1)}' "$zc" 2>/dev/null; then
+            c_ok "  Zen-ключ бесплатных моделей задан"
+        else
+            c_warn "  [fix] нет Zen-ключа — бесплатные модели (Zen Proxy) могут не отвечать"
+            c_dim  "        впиши по шагам: mem helper"
+            problems=$((problems+1))
+        fi
+    else
+        c_dim "  (zen-proxy не найден — бесплатные модели не настроены)"
+    fi
     # phantom process killer (Android 12+) — только подсказка
     if [ -f "$HOME_DIR/rish" ] && [ -x "$HOME_DIR/rish" ]; then
         local ppk
@@ -244,7 +266,7 @@ case "${1:-status}" in
     upgrade|self-update) shift; cmd_upgrade "$@" ;;
     build)        shift; cmd_build "$@" ;;
     help|-h|--help)
-        sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//' ;;
+        sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//' ;;
     *)
-        c_err "неизвестная команда: $1"; echo; sed -n '3,15p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+        c_err "неизвестная команда: $1"; echo; sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
 esac

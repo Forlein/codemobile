@@ -9,6 +9,7 @@
 #    3.  Базовые пакеты (tur-repo, python, node, curl, git, unzip)
 #    4.  OpenCode (ИИ-ассистент)                    — спрашивает, нужен ли
 #    5.  Бесплатные модели (OpenKilo + Zen-Proxy)   — автоконфиг
+#        └ ключ opencode.ai можно ввести сразу или ПРОПУСТИТЬ (позже: mem helper)
 #    6.  VS Code в браузере (code-server)
 #    7.  Скрипты запуска + CLI `codemobile` + termux.properties
 #    8.  Дизайн/оформление (тема-стиль Apple, шрифты, курсор)
@@ -36,6 +37,8 @@
 #    --dry            только показать, что будет сделано
 #    --no-opencode    не ставить OpenCode
 #    --no-models      без бесплатных моделей (OpenKilo/Zen-Proxy)
+#    --zen-key KEY    Zen-ключ для бесплатных моделей (иначе спросит / можно пропустить)
+#    --no-zen-key     не спрашивать ключ (вписать позже командой: mem helper)
 #    --no-code-server без code-server
 #    --no-design      без оформления/дизайна
 #    --no-apk         не качать/не ставить APK
@@ -89,6 +92,8 @@ CodeMobile — установщик VS Code + OpenCode в Termux (одной к�
   bash install.sh --dry      только показать план
   bash install.sh --no-opencode      без OpenCode
   bash install.sh --no-models        без бесплатных моделей
+  bash install.sh --zen-key KEY      Zen-ключ для бесплатных моделей
+  bash install.sh --no-zen-key       не спрашивать ключ (вписать позже: mem helper)
   bash install.sh --no-code-server   без code-server
   bash install.sh --no-design        без оформления
   bash install.sh --no-apk           без APK-лаунчера
@@ -99,6 +104,9 @@ CodeMobile — установщик VS Code + OpenCode в Termux (одной к�
   bash install.sh --refresh          перекачать исходники заново
   bash install.sh --help
 
+Важно: ключ можно НЕ вводить сейчас — жми Enter на запросе ключа (или запусти
+установщик с --no-zen-key), всё поставится, а ключ впишешь позже: mem helper
+
 Репозиторий можно переопределить: CODEMOBILE_REPO=owner/repo bash install.sh
 Зеркала: CODEMOBILE_MIRRORS="https://ghproxy.net/,https://gh-proxy.com/"
 USAGE
@@ -107,12 +115,19 @@ USAGE
 # ── Разбор флагов ────────────────────────────────────────────────────────────
 ASSUME_YES=0; DRY=0
 WANT_OPENCODE=2; WANT_MODELS=2; WANT_CODESERVER=2; WANT_DESIGN=2; WANT_APK=2; WANT_BUILD=2; WANT_HINTS=1
+# Zen-ключ для бесплатных моделей: можно задать заранее (--zen-key / переменная
+# окружения ZEN_KEY / OPENCODE_ZEN_KEY), спросить интерактивно или пропустить.
+ZEN_KEY="${ZEN_KEY:-${OPENCODE_ZEN_KEY:-}}"
+WANT_ZEN_KEY=2
 for a in "$@"; do
     case "$a" in
         -y|--yes)        ASSUME_YES=1 ;;
         --dry)           DRY=1 ;;
         --no-opencode)   WANT_OPENCODE=0 ;;
         --no-models)     WANT_MODELS=0 ;;
+        --zen-key)       shift; [ $# -gt 0 ] || { echo "--zen-key требует ключ"; exit 2; }
+                         ZEN_KEY="$1" ;;
+        --no-zen-key)    WANT_ZEN_KEY=0 ;;
         --no-code-server) WANT_CODESERVER=0 ;;
         --no-design)     WANT_DESIGN=0 ;;
         --no-apk)        WANT_APK=0 ;;
@@ -174,6 +189,130 @@ ask_yn() {                    # ask_yn "вопрос" [Y|N]
             *) echo "    введи y или n" ;;
         esac
     done
+}
+
+# ── Zen-ключ (бесплатные модели): спросить / пропустить / записать ───────────
+mask_key() {                  # mask_key <key> → ••••••••  (для вывода)
+    local k="${1:-}"
+    [ -n "$k" ] || { printf '(нет)'; return; }
+    if [ "${#k}" -le 12 ]; then printf '••••••••'
+    else printf '%s••••••%s' "${k:0:6}" "${k: -4}"; fi
+}
+
+# Записать ключ в конфиг zen-proxy (defaultZenKey). node ИЛИ python3.
+write_zen_key() {             # write_zen_key <config.json> <key>
+    local json="$1" key="$2"
+    if command -v node >/dev/null 2>&1; then
+        node - "$json" "$key" <<'NODE' || return 1
+const fs = require("fs");
+const [p, k] = process.argv.slice(2);
+let c = {}; try { c = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+c.defaultZenKey = k;
+fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+NODE
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$json" "$key" <<'PY' || return 1
+import json, sys
+p, k = sys.argv[1], sys.argv[2]
+try:
+    with open(p, encoding="utf-8") as f: c = json.load(f)
+except Exception: c = {}
+c["defaultZenKey"] = k
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(c, f, ensure_ascii=False, indent=2); f.write("\n")
+PY
+    else
+        err "нет node/python3 — ключ не записать (впиши позже: mem helper)"
+        return 1
+    fi
+}
+
+# ── Провайдер Zen Proxy в конфиге OpenCode ─────────────────────────────────────
+# Подключаем ТОЛЬКО когда есть ключ. Без ключа провайдер не добавляем, чтобы в
+# списке моделей не висели нерабочие «free»-модели: его включит `mem helper`
+# после ввода ключа.
+zen_provider_ensure() {       # zen_provider_ensure <opencode.json>
+    node - "$1" <<'NODE' || return 1
+const fs = require("fs");
+const p = process.argv[2];
+// Мягкий парсинг: сначала обычный JSON (в конфиге есть URL "https://…"), и
+// только если он не прошёл — срезаем комментарии/висячие запятые.
+function parseCfg(t) {
+  try { return JSON.parse(t); } catch {}
+  try {
+    return JSON.parse(
+      t.replace(/^\s*\/\/[^\n]*/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")
+       .replace(/,(\s*[}\]])/g, "$1"));
+  } catch { return {}; }
+}
+let t = "";
+try { t = fs.readFileSync(p, "utf8"); } catch {}
+let cfg = parseCfg(t);
+cfg.plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
+if (!cfg.plugin.includes("openkilo")) cfg.plugin.push("openkilo");
+cfg.provider = cfg.provider || {};
+if (!cfg.provider["zen-proxy"]) {
+  cfg.provider["zen-proxy"] = {
+    npm: "@ai-sdk/openai-compatible", name: "Zen Proxy · бесплатные",
+    options: { baseURL: "http://127.0.0.1:8787/v1", apiKey: "public" },
+    models: { "deepseek-v4.1-flash-free": { name: "DeepSeek V4.1 Flash (free)" } }
+  };
+}
+fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+NODE
+}
+
+zen_provider_remove() {       # zen_provider_remove <opencode.json>
+    node - "$1" <<'NODE' || return 1
+const fs = require("fs");
+const p = process.argv[2];
+function parseCfg(t) {
+  try { return JSON.parse(t); } catch {}
+  try {
+    return JSON.parse(
+      t.replace(/^\s*\/\/[^\n]*/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")
+       .replace(/,(\s*[}\]])/g, "$1"));
+  } catch { return {}; }
+}
+let t = "";
+try { t = fs.readFileSync(p, "utf8"); } catch { process.exit(0); }
+let cfg = parseCfg(t);
+if (cfg.provider && cfg.provider["zen-proxy"]) delete cfg.provider["zen-proxy"];
+fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+NODE
+}
+
+# Спросить ключ. Ключа может не быть — тогда ПРОСТО ПРОПУСКАЕМ: всё остальное
+# ставится, а ключ впишется позже командой `mem helper`.
+prompt_zen_key() {
+    if [ -n "${ZEN_KEY:-}" ]; then
+        ok "Zen-ключ задан ($(mask_key "$ZEN_KEY")) — запишу при настройке Zen-Proxy"
+        return 0
+    fi
+    if [ "$WANT_ZEN_KEY" = 0 ]; then
+        info "Zen-ключ: пропущено — впиши позже: mem helper"
+        return 0
+    fi
+    if [ "$ASSUME_YES" = 1 ] || [ ! -r /dev/tty ]; then
+        info "Zen-ключ не спрашиваем (неинтерактивно) — впиши позже: mem helper"
+        return 0
+    fi
+    say "  ${C}?${N} Бесплатные модели (Zen) отвечают только с ключом opencode.ai."
+    say "    ${DIM}Есть ключ — вставь и Enter. Нет ключа — просто Enter, и мы"
+    say "    всё поставим, а ключ впишешь позже командой: ${C}mem helper${DIM}.${N}"
+    printf '    Zen-ключ (Enter — пропустить): '
+    local k=""
+    IFS= read -rs k </dev/tty 2>/dev/null || k=""
+    printf '\n'
+    k="$(printf '%s' "$k" | tr -d '[:space:]')"
+    case "$k" in
+        ""|n|N|no|No|нет|Нет|skip|пропустить|-)
+            info "ок, пропускаем — впишешь позже: mem helper"
+            return 0 ;;
+    esac
+    ZEN_KEY="$k"
+    ok "ключ принят ($(mask_key "$ZEN_KEY")) — впишу в конфиг zen-proxy"
+    return 0
 }
 
 # ── Прогресс-бар ─────────────────────────────────────────────────────────────
@@ -667,37 +806,34 @@ task_opencode() {
 task_opencode_config() {
     local dir="$HOME_DIR/.config/opencode" cfg="$HOME_DIR/.config/opencode/opencode.json"
     mkdir -p "$dir"
+    local fresh=0
     if [ ! -f "$cfg" ]; then
         install_file tools/opencode.json.seed "$cfg" 644 || return 1
+        fresh=1
     else
-        # неразрушающий мерж: добавляем плагин и провайдера, остальное сохраняем
+        # неразрушающий мерж: копия на случай отката
         cp -p "$cfg" "$cfg.bak-install" 2>/dev/null
-        node - "$cfg" <<'NODE' || return 1
-const fs = require("fs");
-const p = process.argv[2];
-let t = fs.readFileSync(p, "utf8")
-  .replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "")
-  .replace(/,(\s*[}\]])/g, "$1");
-let cfg = {};
-try { cfg = JSON.parse(t); } catch { cfg = {}; }
-cfg.plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
-if (!cfg.plugin.includes("openkilo")) cfg.plugin.push("openkilo");
-cfg.provider = cfg.provider || {};
-if (!cfg.provider["zen-proxy"]) {
-  cfg.provider["zen-proxy"] = {
-    npm: "@ai-sdk/openai-compatible", name: "Zen Proxy · бесплатные",
-    options: { baseURL: "http://127.0.0.1:8787/v1", apiKey: "public" },
-    models: { "deepseek-v4.1-flash-free": { name: "DeepSeek V4.1 Flash (free)" } }
-  };
-}
-fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
-console.log("opencode.json объединён (неразрушающе)");
-NODE
+    fi
+    # Провайдер Zen Proxy подключаем ТОЛЬКО если есть ключ. Нет ключа — не
+    # оставляем нерабочие free-модели: провайдер включит `mem helper` после
+    # ввода ключа (см. zen_provider_ensure/remove выше).
+    if [ -n "${ZEN_KEY:-}" ]; then
+        zen_provider_ensure "$cfg" || return 1
+        echo "провайдер Zen Proxy подключён (есть ключ)"
+    elif [ "$fresh" = 1 ]; then
+        zen_provider_remove "$cfg" || return 1
+        echo "провайдер Zen Proxy пока не подключён (нет ключа) — включит: mem helper"
+    else
+        echo "провайдер Zen Proxy не трогаем (ключа нет); включить: mem helper"
     fi
     # плагин openkilo (бесплатные модели Kilo Gateway)
     npm install --prefix "$dir" openkilo >/dev/null 2>&1 \
         && echo "openkilo установлен" || echo "openkilo: npm пропущен (opencode подтянет сам)"
-    echo "провайдеры: openkilo (Kilo free) + zen-proxy (:8787)"
+    if [ -n "${ZEN_KEY:-}" ]; then
+        echo "провайдеры: openkilo (Kilo free) + zen-proxy (:8787)"
+    else
+        echo "провайдеры: openkilo (Kilo free); zen-proxy — после mem helper"
+    fi
 }
 
 task_zenproxy() {
@@ -720,6 +856,17 @@ task_zenproxy() {
         echo "     из OpenCode Zen подключатся позже: codemobile update && bash install.sh"
     fi
     [ -f "$zen/zen-proxy.json" ] || install_file tools/zen-proxy.json.seed "$zen/zen-proxy.json" 644
+    # Zen-ключ: если пользователь его дал (или ввёл при установке) — пишем сюда.
+    # Если ключа нет — НЕ ломаем установку: всё на месте, ключ впишется позже.
+    if [ -n "${ZEN_KEY:-}" ]; then
+        if write_zen_key "$zen/zen-proxy.json" "$ZEN_KEY"; then
+            echo "Zen-ключ записан ($(mask_key "$ZEN_KEY")) → $zen/zen-proxy.json"
+        else
+            echo "[!!] ключ не записался — впиши позже: mem helper"
+        fi
+    else
+        echo "Zen-ключ не задан — бесплатные модели включатся после: mem helper"
+    fi
     echo "zen-proxy: $zen"
     return 0
 }
@@ -752,6 +899,7 @@ task_shortcuts() {
     install_file tools/shortcuts/OpenCode-Watch "$HOME_DIR/.shortcuts/OpenCode-Watch" 700
     install_file tools/opencode2 "$PREFIX/bin/opencode2" 755
     install_file tools/codemobile "$PREFIX/bin/codemobile" 755
+    install_file tools/mem "$PREFIX/bin/mem" 755
     install_file tools/merge_settings.py "$HOME_DIR/.local/share/codemobile/merge_settings.py" 644
     # termux.properties: allow-external-apps (лаунчеру нужно для RUN_COMMAND)
     local prop="$HOME_DIR/.termux/termux.properties"
@@ -903,6 +1051,7 @@ say "${B}Что установить?${N} (Enter = значение по умо�
 [ "$WANT_OPENCODE"  = 2 ] && { ask_yn "Установить ИИ-ассистент OpenCode?" Y && WANT_OPENCODE=1 || WANT_OPENCODE=0; }
 if [ "$WANT_OPENCODE" = 1 ]; then
     [ "$WANT_MODELS" = 2 ] && { ask_yn "  └ бесплатные модели (OpenKilo + Zen-Proxy) с автонастройкой?" Y && WANT_MODELS=1 || WANT_MODELS=0; }
+    [ "$WANT_MODELS" = 1 ] && prompt_zen_key
 else
     WANT_MODELS=0
 fi
@@ -969,6 +1118,7 @@ say "${B}Как пользоваться:${N}"
 say "  • Телефон: открой иконку «VS Code» — сервисы поднимутся сами, откроется редактор."
 say "  • Терминал: ${C}codemobile start|stop|status|doctor|models|logs${N}"
 say "  • ИИ-ассистент: в VS Code встроенный терминал → ${C}opencode${N} (Tab — переключение агента)."
+[ "$WANT_MODELS" = 1 ] && say "  • Бесплатные модели: ${C}mem helper${N} — вставит Zen-ключ по шагам (если его ещё нет)."
 say "  • Пароль code-server: ${C}cat ~/.config/code-server/config.yaml${N}"
 [ "$WANT_BUILD" = 1 ] && say "  • Сборка из исходников: ${C}codemobile build${N} → APK в Download/CodeMobile-<версия>.apk"
 say ""

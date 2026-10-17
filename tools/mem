@@ -1,0 +1,410 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# =============================================================================
+#  mem — помощник CodeMobile: бесплатные модели и ключ OpenCode Zen.
+#
+#  Зачем он нужен: при установке ключ можно ПРОПУСТИТЬ (если аккаунта/ключа ещё
+#  нет). Тогда ставится всё остальное, а провайдер «Zen Proxy» просто остаётся
+#  без ключа. Этот помощник проводит по шагам, подсказывает, где взять ключ,
+#  вписывает его в конфиг zen-proxy и проверяет, что модели отвечают.
+#
+#    mem              то же, что mem helper
+#    mem helper       пошаговый помощник (меню + подсказки)
+#    mem key [KEY]    вписать/обновить Zen-ключ (без вопросов, если KEY задан)
+#    mem del-key      удалить ключ (снова работать без него)
+#    mem status       состояние: zen-proxy, ключ, список моделей
+#    mem test [MODEL] послать тестовый запрос к бесплатной модели
+#    mem restart      перезапустить zen-proxy
+#    mem help
+#
+#  Ключ НЕ обязателен: без него всё остальное работает, но бесплатные модели
+#  через zen-proxy отвечать не будут (free-доступ требует аккаунт opencode.ai).
+# =============================================================================
+set -uo pipefail
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+export PATH="$PREFIX/bin:$PREFIX/opt/nodejs-24/bin:$PATH"
+
+ZEN_PORT="${ZEN_PORT:-8787}"
+LOG_DIR="$HOME_DIR/.cache/opencodelauncher"
+OPENCODE_CFG="$HOME_DIR/.config/opencode/opencode.json"
+
+C_OK=$'\033[32m'; C_WARN=$'\033[33m'; C_ERR=$'\033[31m'
+C_DIM=$'\033[2m'; C_B=$'\033[1m'; C_C=$'\033[36m'; C_N=$'\033[0m'
+[ -t 1 ] || { C_OK=""; C_WARN=""; C_ERR=""; C_DIM=""; C_B=""; C_C=""; C_N=""; }
+
+ok()   { printf '  %s[ok]%s %s\n' "$C_OK"   "$C_N" "$*"; }
+warn() { printf '  %s[!!]%s %s\n' "$C_WARN" "$C_N" "$*"; }
+err()  { printf '  %s[XX]%s %s\n' "$C_ERR"  "$C_N" "$*"; }
+info() { printf '  %s[--]%s %s\n' "$C_DIM"  "$C_N" "$*"; }
+
+# ── Где живёт zen-proxy (установщик может положить в .zen-proxy или zen-proxy) ─
+ZEN_DIR=""
+zen_dir() {
+    if [ -z "$ZEN_DIR" ]; then
+        local d
+        for d in "$HOME_DIR/.zen-proxy" "$HOME_DIR/zen-proxy"; do
+            if [ -f "$d/zen-proxy.mjs" ]; then ZEN_DIR="$d"; break; fi
+        done
+        if [ -z "$ZEN_DIR" ]; then
+            if   [ -d "$HOME_DIR/.zen-proxy" ]; then ZEN_DIR="$HOME_DIR/.zen-proxy"
+            elif [ -d "$HOME_DIR/zen-proxy" ];   then ZEN_DIR="$HOME_DIR/zen-proxy"
+            else ZEN_DIR="$HOME_DIR/.zen-proxy"; fi
+        fi
+    fi
+    printf '%s' "$ZEN_DIR"
+}
+zen_cfg() { printf '%s/zen-proxy.json' "$(zen_dir)"; }
+zen_mjs() { printf '%s/zen-proxy.mjs' "$(zen_dir)"; }
+
+mask_key() {                # mask_key <key> → ••••
+    local k="$1"
+    [ -n "$k" ] || { printf '(нет)'; return; }
+    if [ "${#k}" -le 12 ]; then printf '••••••••'
+    else printf '%s••••••%s' "${k:0:6}" "${k: -4}"; fi
+}
+
+# ── Чтение/запись ключа в zen-proxy.json ─────────────────────────────────────
+key_value() {               # печатает defaultZenKey (или пусто)
+    local cfg; cfg="$(zen_cfg)"
+    [ -f "$cfg" ] || return 0
+    if command -v node >/dev/null 2>&1; then
+        node - "$cfg" 2>/dev/null <<'NODE'
+const fs = require("fs");
+let c = {}; try { c = JSON.parse(fs.readFileSync(process.argv[2], "utf8")); } catch {}
+process.stdout.write(String(c.defaultZenKey || ""));
+NODE
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$cfg" 2>/dev/null <<'PY'
+import json, sys
+try:
+    with open(sys.argv[1], encoding="utf-8") as f: c = json.load(f)
+except Exception: c = {}
+print(c.get("defaultZenKey", ""), end="")
+PY
+    fi
+}
+
+write_key() {               # write_key <key>  (пустая строка = стереть)
+    local key="${1:-}" cfg; cfg="$(zen_cfg)"
+    mkdir -p "$(dirname "$cfg")" 2>/dev/null
+    [ -f "$cfg" ] || printf '{\n  "defaultZenKey": ""\n}\n' >"$cfg"
+    if command -v node >/dev/null 2>&1; then
+        node - "$cfg" "$key" <<'NODE' || return 1
+const fs = require("fs");
+const [p, k] = process.argv.slice(2);
+let c = {}; try { c = JSON.parse(fs.readFileSync(p, "utf8")); } catch {}
+c.defaultZenKey = k;
+fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+NODE
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$cfg" "$key" <<'PY' || return 1
+import json, sys
+p, k = sys.argv[1], sys.argv[2]
+try:
+    with open(p, encoding="utf-8") as f: c = json.load(f)
+except Exception: c = {}
+c["defaultZenKey"] = k
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(c, f, ensure_ascii=False, indent=2); f.write("\n")
+PY
+    else
+        err "нужен node или python3, чтобы записать ключ"
+        return 1
+    fi
+}
+
+# ── zen-proxy: состояние, список моделей, перезапуск, тест ───────────────────
+http_code() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+proxy_up()  { [ "$(http_code "http://127.0.0.1:$ZEN_PORT/health")" != "000" ]; }
+
+models_ids() {
+    local raw
+    raw="$(curl -s -m 5 "http://127.0.0.1:$ZEN_PORT/v1/models" 2>/dev/null)"
+    [ -n "$raw" ] || return 1
+    if command -v node >/dev/null 2>&1; then
+        printf '%s' "$raw" | node -e '
+let s = "";
+process.stdin.on("data", d => s += d).on("end", () => {
+  try { const j = JSON.parse(s); (j.data || j.models || []).forEach(m => console.log(m.id || m.name)); } catch {}
+});'
+    elif command -v python3 >/dev/null 2>&1; then
+        printf '%s' "$raw" | python3 -c '
+import sys, json
+try: j = json.load(sys.stdin)
+except Exception: sys.exit(1)
+for m in (j.get("data") or j.get("models") or []):
+    print(m.get("id") or m.get("name"))'
+    fi
+}
+
+restart_proxy() {
+    local mjs; mjs="$(zen_mjs)"
+    [ -f "$mjs" ] || { err "zen-proxy не установлен ($mjs) — запусти: bash install.sh"; return 1; }
+    command -v node >/dev/null 2>&1 || { err "нет node — pkg install nodejs-lts"; return 1; }
+    pkill -f 'zen-proxy.mjs' >/dev/null 2>&1 || true
+    sleep 1
+    mkdir -p "$LOG_DIR"
+    setsid nohup node "$mjs" >>"$LOG_DIR/zen-proxy.log" 2>&1 </dev/null &
+    disown 2>/dev/null || true
+    local i
+    for i in $(seq 1 15); do proxy_up && break; sleep 1; done
+    if proxy_up; then ok "zen-proxy перезапущен (:$ZEN_PORT)"
+    else warn "zen-proxy не поднялся — смотри $LOG_DIR/zen-proxy.log"; return 1; fi
+}
+
+test_model() {              # test_model [MODEL]
+    local model="${1:-}" resp msg
+    proxy_up || { warn "zen-proxy не отвечает на :$ZEN_PORT — попробуй: mem restart"; return 1; }
+    [ -n "$model" ] || model="$(models_ids 2>/dev/null | head -n1)"
+    [ -n "$model" ] || { warn "не удалось получить список моделей"; return 1; }
+    info "проверяю модель: $model"
+    resp="$(curl -s -m 60 "http://127.0.0.1:$ZEN_PORT/v1/chat/completions" \
+        -H 'content-type: application/json' -H 'authorization: Bearer public' \
+        -d "{\"model\":\"$model\",\"messages\":[{\"role\":\"user\",\"content\":\"ping\"}],\"max_tokens\":5}" 2>/dev/null)"
+    [ -n "$resp" ] || { err "пустой ответ от zen-proxy"; return 1; }
+    case "$resp" in
+        *'"choices"'*) ok "модель отвечает — бесплатные модели работают"; return 0 ;;
+    esac
+    msg="$(printf '%s' "$resp" | sed -n 's/.*"message":"\([^"]*\)".*/\1/p')"
+    err "модель не ответила${msg:+: $msg}"
+    case "$resp" in
+        *FreeTierError*|*ModelDeprecated*|*Gated*|*gate*)
+            info "это ограничение бесплатного доступа — нужен ключ opencode.ai: ${C_C}mem key${C_N}" ;;
+    esac
+    return 1
+}
+
+# ── Провайдер zen-proxy в конфиге OpenCode (включается вместе с ключом) ───────
+_provider_node() {           # _provider_node <json> <port> <ids\n> <add|del>
+    node - "$1" "$2" "$3" "$4" <<'NODE' || return 1
+const fs = require("fs");
+const [p, port, idsRaw, act] = process.argv.slice(2);
+function parseCfg(t) {
+  try { return JSON.parse(t); } catch {}
+  try {
+    return JSON.parse(
+      t.replace(/^\s*\/\/[^\n]*/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")
+       .replace(/,(\s*[}\]])/g, "$1"));
+  } catch { return {}; }
+}
+let c = {};
+try { c = parseCfg(fs.readFileSync(p, "utf8")); } catch {}
+c.plugin = Array.isArray(c.plugin) ? c.plugin : [];
+if (!c.plugin.includes("openkilo")) c.plugin.push("openkilo");
+c.provider = c.provider || {};
+if (act === "del") {
+  delete c.provider["zen-proxy"];
+} else {
+  const ids = String(idsRaw || "").split("\n").map(s => s.trim()).filter(Boolean);
+  const models = {};
+  ids.forEach(id => { models[id] = { name: id }; });
+  c.provider["zen-proxy"] = Object.assign(
+    { npm: "@ai-sdk/openai-compatible", name: "Zen Proxy · бесплатные",
+      options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "public" } },
+    c.provider["zen-proxy"] || {}, { models });
+}
+fs.mkdirSync(require("path").dirname(p), { recursive: true });
+fs.writeFileSync(p, JSON.stringify(c, null, 2) + "\n");
+NODE
+}
+
+register_provider() {        # включить провайдер zen-proxy в opencode.json
+    local ids=""
+    proxy_up && ids="$(models_ids 2>/dev/null)"
+    [ -n "$ids" ] || ids="deepseek-v4.1-flash-free"
+    if command -v node >/dev/null 2>&1; then
+        _provider_node "$OPENCODE_CFG" "$ZEN_PORT" "$ids" add || return 1
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$OPENCODE_CFG" "$ZEN_PORT" "$ids" <<'PY' || return 1
+import json, os, sys
+p, port, ids = sys.argv[1], sys.argv[2], sys.argv[3]
+try:
+    with open(p, encoding="utf-8") as f: c = json.load(f)
+except Exception: c = {}
+c.setdefault("plugin", [])
+if "openkilo" not in c["plugin"]: c["plugin"].append("openkilo")
+prov = c.setdefault("provider", {})
+models = {i.strip(): {"name": i.strip()} for i in ids.split("\n") if i.strip()}
+old = prov.get("zen-proxy", {})
+base = {"npm": "@ai-sdk/openai-compatible", "name": "Zen Proxy · бесплатные",
+        "options": {"baseURL": f"http://127.0.0.1:{port}/v1", "apiKey": "public"}}
+prov["zen-proxy"] = {**base, **old, "models": models}
+os.makedirs(os.path.dirname(p), exist_ok=True)
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(c, f, ensure_ascii=False, indent=2); f.write("\n")
+PY
+    else
+        err "нужен node или python3, чтобы поправить конфиг OpenCode"
+        return 1
+    fi
+    ok "провайдер Zen Proxy подключён в конфиг OpenCode"
+}
+
+unregister_provider() {      # убрать провайдер zen-proxy из opencode.json
+    [ -f "$OPENCODE_CFG" ] || return 0
+    if command -v node >/dev/null 2>&1; then
+        _provider_node "$OPENCODE_CFG" "$ZEN_PORT" "" del >/dev/null 2>&1 || return 1
+    elif command -v python3 >/dev/null 2>&1; then
+        python3 - "$OPENCODE_CFG" <<'PY' >/dev/null 2>&1 || return 1
+import json, sys
+p = sys.argv[1]
+try:
+    with open(p, encoding="utf-8") as f: c = json.load(f)
+except Exception: sys.exit(0)
+if isinstance(c.get("provider"), dict): c["provider"].pop("zen-proxy", None)
+with open(p, "w", encoding="utf-8") as f:
+    json.dump(c, f, ensure_ascii=False, indent=2); f.write("\n")
+PY
+    fi
+    info "провайдер Zen Proxy убран из конфига OpenCode"
+}
+
+# ── Действия ─────────────────────────────────────────────────────────────────
+cmd_status() {
+    echo "── mem · состояние ───────────────────────────────"
+    local cfg key n
+    cfg="$(zen_cfg)"; key="$(key_value)"
+    printf '  каталог zen-proxy: %s\n' "$(zen_dir)"
+    [ -f "$(zen_mjs)" ] && ok "движок zen-proxy.mjs на месте" || warn "нет zen-proxy.mjs (не установлен?)"
+    [ -f "$cfg" ]      && ok "конфиг: $cfg"            || warn "нет конфига zen-proxy.json"
+    if [ -n "$key" ]; then ok "Zen-ключ: $(mask_key "$key")"; else warn "Zen-ключ: нет (вписать: mem key)"; fi
+    if proxy_up; then
+        ok "прокси отвечает на :$ZEN_PORT"
+        n="$(models_ids 2>/dev/null | wc -l | tr -d ' ')"
+        info "моделей в списке: ${n:-0}"
+    else
+        warn "прокси не отвечает на :$ZEN_PORT (поднять: mem restart)"
+    fi
+    [ -f "$OPENCODE_CFG" ] && ok "конфиг OpenCode: $OPENCODE_CFG" \
+                           || warn "нет конфига OpenCode (переустанови: bash install.sh)"
+    if [ -f "$OPENCODE_CFG" ]; then
+        if grep -q '"zen-proxy"' "$OPENCODE_CFG" 2>/dev/null; then
+            ok "провайдер Zen Proxy в конфиге OpenCode: подключён"
+        else
+            warn "провайдер Zen Proxy в конфиге OpenCode: не подключён (включит: mem key)"
+        fi
+    fi
+    echo "──────────────────────────────────────────────────"
+}
+
+cmd_del_key() {
+    if write_key ""; then
+        ok "ключ удалён — бесплатные модели будут недоступны без ключа"
+        unregister_provider
+        info "вернуть: mem key"
+    else
+        return 1
+    fi
+}
+
+cmd_key() {                 # cmd_key [KEY]
+    local key="${1:-}"
+    if [ -z "$key" ]; then
+        if [ ! -r /dev/tty ]; then err "нет tty — передай ключ так: mem key <KEY>"; return 2; fi
+        printf '  %sZen-ключ%s (вставь и Enter; пусто — отмена): ' "$C_B" "$C_N"
+        IFS= read -rs key </dev/tty 2>/dev/null || key=""
+        printf '\n'
+        key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    fi
+    [ -n "$key" ] || { info "отменено — ключ не изменён"; return 0; }
+    if write_key "$key"; then
+        ok "ключ записан ($(mask_key "$key")) → $(zen_cfg)"
+        proxy_up || restart_proxy
+        register_provider
+        info "zen-proxy подхватывает конфиг на лету; не сработало — mem restart"
+        test_model || true
+    else
+        err "не удалось записать ключ"
+        return 1
+    fi
+}
+
+helper_howto() {
+    cat <<EOF
+  ${C_B}Где взять ключ OpenCode Zen:${C_N}
+    1) Открой ${C_C}https://opencode.ai${C_N} и войди (или создай аккаунт).
+    2) Раздел ${C_B}Zen${C_N} → ${C_B}API keys${C_N}.
+    3) Создай ключ и скопируй его целиком.
+    4) Вернись сюда, выбери пункт ${C_B}1${C_N} — ключ впишется в конфиг
+       zen-proxy ($(zen_cfg)).
+
+  ${C_DIM}Ключ хранится только на этом устройстве. Нет аккаунта — можно пропустить:
+  остальные функции CodeMobile работают и без него.${C_N}
+EOF
+}
+
+helper_enter_key() {
+    helper_howto
+    printf '  Вставь ключ и нажми Enter (пусто — отмена): '
+    local k=""
+    IFS= read -rs k </dev/tty 2>/dev/null || k=""
+    printf '\n'
+    k="$(printf '%s' "$k" | tr -d '[:space:]')"
+    [ -n "$k" ] || { info "отменено"; return 0; }
+    if write_key "$k"; then
+        ok "ключ записан ($(mask_key "$k"))"
+        proxy_up || restart_proxy
+        register_provider
+        info "проверяю бесплатные модели…"
+        test_model || true
+    else
+        err "не удалось записать ключ"
+    fi
+}
+
+cmd_helper() {
+    echo
+    echo "  ${C_B}CodeMobile · помощник по бесплатным моделям${C_N}"
+    echo "  ${C_DIM}Бесплатные модели (Zen Proxy) требуют ключ opencode.ai.${C_N}"
+    echo "  ${C_DIM}Нет ключа — не страшно: всё остальное уже работает, а ключ${C_N}"
+    echo "  ${C_DIM}можно вписать в любой момент (пункт 1).${C_N}"
+    echo
+    local key; key="$(key_value)"
+    if [ -n "$key" ]; then ok "Сейчас настроен ключ: $(mask_key "$key")"
+    else warn "Сейчас ключ не настроен."; fi
+    echo
+    while true; do
+        cat <<EOF
+  ${C_B}Что сделать?${C_N}
+    1) Ввести или обновить Zen-ключ      ${C_DIM}(подскажу, где взять)${C_N}
+    2) Проверить бесплатные модели
+    3) Перезапустить zen-proxy
+    4) Удалить ключ
+    5) Показать состояние
+    6) Как получить ключ (справка)
+    0) Выйти ${C_DIM}(можно без ключа)${C_N}
+EOF
+        printf '  Выбор [0]: '
+        local a=""
+        IFS= read -r a </dev/tty 2>/dev/null || a="0"
+        a="${a:-0}"
+        echo
+        case "$a" in
+            1) helper_enter_key ;;
+            2) test_model || true ;;
+            3) restart_proxy ;;
+            4) cmd_del_key ;;
+            5) cmd_status ;;
+            6) helper_howto ;;
+            0|q|Q|exit|выход) info "готово. Вернуться: mem helper"; break ;;
+            *) warn "нет такого пункта" ;;
+        esac
+        echo
+    done
+}
+
+cmd_help() { sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'; }
+
+case "${1:-helper}" in
+    helper|setup|"")  cmd_helper ;;
+    key|set-key)      shift; cmd_key "${1:-}" ;;
+    del-key|unset-key|remove-key) cmd_del_key ;;
+    status|st)        cmd_status ;;
+    test|check)       shift; test_model "${1:-}" ;;
+    restart)          restart_proxy ;;
+    help|-h|--help)   cmd_help ;;
+    *)
+        err "неизвестная команда: $1"; echo
+        cmd_help; exit 2 ;;
+esac

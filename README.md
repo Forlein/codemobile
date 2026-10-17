@@ -113,6 +113,7 @@ sh get.sh --direct
 |---|---|
 | **ИИ‑ассистент OpenCode?** | ставит `opencode` (если уже есть — обновит, ничего не удаляя) |
 | ↳ **бесплатные модели?** | `openkilo` + `zen-proxy` с автонастройкой конфига |
+| ↳ **Zen‑ключ?** | можно вставить сразу, а можно **пропустить** (Enter) — впишешь позже: `mem helper` |
 | **VS Code в браузере (code-server)?** | ставит сервер VS Code |
 | ↳ **оформление?** | применяет дизайн (матовая прозрачность, шрифты, курсор) |
 | **APK‑лаунчер?** | скачивает APK из **Releases** и ставит иконку на телефон |
@@ -121,7 +122,12 @@ sh get.sh --direct
 
 Флаги: `--yes`, `--no-apk`, `--no-opencode`, `--no-models`,
 `--no-code-server`, `--no-design`, `--build`, `--dry`, `--mirror URL`,
-`--refresh` (см. `--help`).
+`--zen-key KEY`, `--no-zen-key`, `--refresh` (см. `--help`).
+
+> **Нет аккаунта opencode.ai?** Это не помешает установке. Ключ можно ввести
+> при установке — или пропустить (просто Enter) и вписать позже командой
+> **`mem helper`**, которая по шагам подскажет, где взять ключ, и сама
+> пропишет его в конфиг `zen-proxy`.
 
 Всё сразу, без вопросов:
 
@@ -198,7 +204,8 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
 3. **opencode2** — ИИ‑ассистент (пакет Termux); плюс наш враппер (`--standalone`);
 4. **openkilo** (плагин OpenCode) — 40+ бесплатных моделей Kilo Gateway, без ключа;
 5. **zen-proxy** (`github.com/12errh/zen-proxy`) — локальный прокси `:8787` к
-   бесплатным моделям OpenCode Zen;
+   бесплатным моделям OpenCode Zen (ключ можно ввести при установке или позже
+   через `mem helper`);
 6. **code-server** — сам VS Code в браузере (пакет Termux);
 7. **APK‑лаунчер** — из раздела **Releases** этого репозитория (файл `CodeMobile-*.apk`).
 
@@ -223,10 +230,21 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
   codemobile logs       # хвост логов
   codemobile upgrade    # обновить сам проект (исходники + скрипты)
   codemobile build      # собрать APK на телефоне (после install.sh --build)
+  mem helper            # вписать Zen-ключ для бесплатных моделей (по шагам)
   ```
 
 * **ИИ‑ассистент:** в VS Code открой терминал и запусти `opencode`.
   Выбор модели — внутри. Бесплатные: провайдеры **OpenKilo** и **Zen Proxy**.
+
+* **Нет ключа opencode.ai?** Пропусти его при установке и позже выполни
+  `mem helper` — помощник объяснит, где взять ключ, и сам пропишет его:
+
+  ```bash
+  mem helper            # меню-помощник (ввод ключа, проверка моделей)
+  mem key <КЛЮЧ>        # вписать ключ одной строкой
+  mem status            # ключ, прокси, список моделей
+  mem test              # послать тестовый запрос к бесплатной модели
+  ```
 
 ---
 
@@ -246,6 +264,7 @@ tail -f ~/.cache/opencodelauncher/watch.log
 | `code-server` не отвечает | не поднят / упал | `codemobile start`, смотри `~/.cache/opencodelauncher/code-server.log` |
 | Всё «пропадает» в фоне | phantom process killer (Android 12+) | выключить через Shizuku (`codemobile doctor`) |
 | Нет бесплатных моделей | zen-proxy не запущен | `codemobile start`, затем `codemobile models` |
+| Бесплатные модели не отвечают («deprecated») | нет Zen‑ключа или free‑доступ изменился | `mem helper` (вставить ключ) или `mem status`; без ключа используй провайдер **OpenKilo** |
 | Не устанавливается APK | нет разрешения | разреши Termux «установку приложений», либо открой файл из `Download/` |
 
 ---
@@ -303,6 +322,7 @@ codemobile/
 │   ├── shortcuts/          # OpenCode-All / Stop / Watch (поднимают и стерегут сервисы)
 │   ├── opencode2           # враппер OpenCode
 │   ├── codemobile          # CLI (start/stop/status/doctor/models/logs/upgrade/build)
+│   ├── mem                 # помощник: Zen-ключ для бесплатных моделей (mem helper)
 │   ├── settings.seed.json  # оформление для settings.json code-server
 │   ├── opencode.json.seed  # конфиг OpenCode с бесплатными моделями
 │   ├── zen-proxy.json.seed # конфиг zen-proxy

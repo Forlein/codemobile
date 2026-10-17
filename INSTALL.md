@@ -106,7 +106,7 @@ sh -c "$(curl -fsSL https://raw.githubusercontent.com/Forlein/codemobile/main/ge
 
 Любой другой флаг уходит в install.sh:
   --yes --no-apk --no-opencode --no-models --no-code-server --no-design
-  --build --dry --refresh --mirror URL
+  --build --dry --refresh --mirror URL --zen-key KEY --no-zen-key
 ```
 
 ### Переменные окружения
@@ -117,6 +117,33 @@ CODEMOBILE_BRANCH=dev              # своя ветка/тег
 CODEMOBILE_SRC=~/cm/src            # каталог исходников
 CODEMOBILE_MIRRORS="https://ghproxy.net/,https://gh-proxy.com/"
 CODEMOBILE_APK=~/Download/CodeMobile.apk   # свой APK для установки
+ZEN_KEY=...                                # Zen-ключ (или OPENCODE_ZEN_KEY)
+```
+
+### Ключ к бесплатным моделям — можно пропустить
+
+Бесплатные модели через `zen-proxy` отвечают только с ключом
+[opencode.ai](https://opencode.ai). При установке установщик спросит ключ:
+
+* **есть ключ** — вставь его (или задай заранее: `--zen-key KEY`,
+  `ZEN_KEY=...`) — он запишется в `zen-proxy.json`;
+* **нет ключа / нет аккаунта** — просто нажми **Enter** (или запусти с
+  `--no-zen-key`). Установка **не прервётся**: поставится всё, включая
+  `zen-proxy`, но провайдер «Zen Proxy» в конфиг OpenCode **не добавится**,
+  чтобы в списке моделей не было нерабочих. Его подключит `mem helper`
+  после ввода ключа.
+
+Заодно без ключа работают встроенные бесплатные модели (`opencode-go`), так
+что ассистентом можно пользоваться сразу.
+
+Вписать ключ позже, по шагам, в любой момент:
+
+```bash
+mem helper            # меню-помощник: где взять ключ, ввод, проверка моделей
+mem key <КЛЮЧ>        # вписать одной командой
+mem status            # что настроено (ключ, прокси, модели)
+mem test              # проверить, отвечают ли бесплатные модели
+mem del-key           # удалить ключ
 ```
 
 ---
@@ -222,6 +249,7 @@ build‑tools 36.0.0) и Gradle‑кэш. Первая сборка идёт с 
 | Бесконечное «подключение» в приложении | не включён `allow-external-apps` | `bash install.sh` (сам допишет) → `termux-reload-settings` |
 | Всё «пропадает» в фоне | phantom process killer (Android 12+) | выключить через Shizuku — см. `codemobile doctor` |
 | Нет бесплатных моделей | `zen-proxy` не поднят | `codemobile start`, потом `codemobile models` |
+| Бесплатные модели не отвечают («deprecated»/gated) | нет Zen‑ключа | `mem helper` (вставить ключ) или `mem status`; без ключа — провайдер **OpenKilo** |
 | Не ставится APK | нет разрешения «Установка приложений» | Настройки → Приложения → Termux → Установка приложений → Разрешить; либо открой файл из `Download/` |
 | `Permission denied` на `/storage/emulated/0` | нет доступа к памяти | `termux-setup-storage`; HyperOS: разрешение «Файлы и медиа → Управление всеми файлами» |
 | Termux убивается в фоне (Xiaomi) | агрессивная экономия | Автозапуск ВКЛ, «Без ограничений» по батарее, замок на карточке в недавних |
@@ -229,7 +257,8 @@ build‑tools 36.0.0) и Gradle‑кэш. Первая сборка идёт с 
 Диагностика одной командой:
 
 ```bash
-codemobile doctor
+codemobile doctor          # окружение и настройки
+mem status                 # ключ, zen-proxy, список бесплатных моделей
 ```
 
 ---
