@@ -36,12 +36,11 @@
     "chat.unifiedAgentsBar.enabled": true,
     "workbench.activityBar.location": "top",
 
-    // === Тема эпохи new_era_01_v_1 (2026-10-17) ===
-    // Основные цвета живут в теме-расширении local.ocl-newera («OCL New Era»),
-    // а матовая прозрачность диалогов/окон (на цветах самой выбранной темы) и
-    // единый красно-розовый курсор #FF2D55 (как и его след) заданы ниже в
-    // workbench.colorCustomizations для всех тем.
-    "workbench.colorTheme": "Kimbie Dark",
+    // === Оформление (design) ===
+    // Матовая прозрачность окон/диалогов и единый красно-розовый курсор
+    // #FF2D55 (как и его след) заданы ниже в workbench.colorCustomizations —
+    // работают ПОВЕРХ любой темы. Саму тему не навязываем: выбери сам
+    // (Ctrl+K Ctrl+T); оформление ляжет поверх.
     "editor.fontFamily": "MiSans, -apple-system, sans-serif",
     "editor.fontLigatures": false,
     "terminal.integrated.fontFamily": "Droid Sans Mono",
