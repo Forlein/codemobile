@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Сплэш: светлая матовая тёплая оболочка (НЕ чистый белый) + логотип + название
+     + лаконичная метка @4rlein. Плавно появляется (anim/splash_fade_in) и плавно
+     уходит, когда WebView загрузил страницу (см. MainActivity). Оболочка/редкие
+     экраны — светлые тёплые, рабочая зона — тёмная. -->
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@color/splash_bg"
+    android:id="@+id/splash_root">
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="center"
+        android:orientation="vertical"
+        android:gravity="center"
+        android:id="@+id/splash_content">
+
+        <ImageView
+            android:id="@+id/splash_logo"
+            android:layout_width="96dp"
+            android:layout_height="96dp"
+            android:src="@drawable/vs_logo"
+            android:contentDescription="@string/app_name" />
+
+        <TextView
+            android:id="@+id/splash_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="20dp"
+            android:text="Visual Studio Code"
+            android:textColor="@color/splash_text"
+            android:textSize="18sp"
+            android:letterSpacing="0.02"
+            android:fontFamily="sans-serif-light" />
+
+        <TextView
+            android:id="@+id/splash_subtitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:text="for Android"
+            android:textColor="@color/splash_muted"
+            android:textSize="12sp"
+            android:letterSpacing="0.08"
+            android:fontFamily="sans-serif-light" />
+
+        <!-- Лаконичная метка автора — мелким шрифтом под подписью. -->
+        <TextView
+            android:id="@+id/splash_tag"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/tag"
+            android:textColor="@color/splash_tag"
+            android:textSize="10sp"
+            android:letterSpacing="0.18"
+            android:fontFamily="sans-serif-light" />
+
+    </LinearLayout>
+</FrameLayout>

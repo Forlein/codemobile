@@ -1,0 +1,434 @@
+#!/data/data/com.termux/files/usr/bin/python3
+# -*- coding: utf-8 -*-
+"""
+OpenCode-Watch — «сторож» OpenCodeLauncher (задачи 3 и 4).
+
+Запускается из OpenCode-All (setsid/nohup) и живёт в фоне Termux, пока
+работают сервисы. Две независимые причины выключить всё:
+
+  1) ПРИЛОЖЕНИЕ ЗАКРЫТО (задача 4). Лаунчер шлёт heartbeat на
+     127.0.0.1:8799 каждые 15 секунд ('P' — просто жив, 'A' — был ввод
+     пользователя, 'F'/'B' — приложение на экране/ушло в фон). Молчание
+     heartbeat'а APP_TIMEOUT секунд считается смертью приложения ТОЛЬКО
+     если последним состоянием было 'F' (приложение было на экране) И при
+     этом никакие сервисы не работают (ни пользователя, ни CPU). Только
+     тогда гасим сервисы, а когда Termux никем не пользуются — убиваем и
+     сам Termux.
+     ВАЖНО (фикс 2026-10-17): если последним состоянием было 'B',
+     молчание НЕ считается смертью приложения. Android морозит фоновые
+     процессы (cached app freezer), heartbeat встаёт — раньше сторож гасил
+     всё у живого, но замороженного приложения, и возврат в лаунчер давал
+     вечный «reconnect». Свайп из реестра и так гасит всё сразу
+     (onTaskRemoved), а забытый фон добьёт простой (пункт 2).
+     ФИКС 2026-10-17 (второй): до него флаг 'B' собирался, но в условии
+     app_gone НЕ использовался — замороженное в фоне приложение всё равно
+     убивалось через 90 с молчания (это и был баг «внезапного выключения
+     всей системы, пока ассистент работает в фоне/при выключенном экране»).
+     Теперь app_gone требует not bg и отсутствия свежей нагрузки.
+  2) ПРОСТОЙ (задача 3). Если нет ни ввода пользователя, ни работы
+      ассистента (CPU opencode/code-server/zen-proxy/оболочки) в
+      течение IDLE_LIMIT — гасим всё, чтобы забытая планшетная сессия не
+      ела батарею и RAM.
+      БЫЛО 20 мин → reconnect долгого фона ронял работу VS Code слишком
+      рано. СТАЛО: по умолчанию 2 часа; выбор — ползунком в шторке
+      лаунчера (свайп двумя пальцами вверх): 15/30 мин, 1/2/4/6/12 ч.
+      Лаунчер пересылает выбранный порог командой 'R<секунды>' по этому
+      же heartbeat-сокету (сразу после смены и раз в ~2 мин).
+
+
+Оба пути ведут в один лестничный спуск:
+     OpenCode-Stop            → погасить code-server/zen-proxy/opencode
+     OpenCode-Stop --termux   → то же + убить процесс Termux (последним шагом)
+
+Пока сервисы не поднимались через лаунчер (никогда не было пингов) —
+сторож НИЧЕГО не делает: вручную заведённая сессия Termux его не касается.
+
+Лог: ~/.cache/opencodelauncher/watch.log
+Тюнинг через окружение: WATCH_PORT, WATCH_TICK, APP_TIMEOUT, IDLE_LIMIT,
+BUSY_WINDOW, BUSY_CPU, KILL_QUIET, WATCH_STOP (путь к стоп-скрипту).
+"""
+import glob
+import os
+import signal
+import socket
+import subprocess
+import sys
+import threading
+import time
+
+PREFIX = "/data/data/com.termux/files/usr"
+HOME_DIR = "/data/data/com.termux/files/home"
+DEFAULT_STOP = os.path.join(HOME_DIR, ".shortcuts", "OpenCode-Stop")
+STOP_SCRIPT = os.environ.get("WATCH_STOP", DEFAULT_STOP)
+LOG_DIR = os.environ.get("WATCH_DIR") or os.path.join(HOME_DIR, ".cache", "opencodelauncher")
+LOG_FILE = os.path.join(LOG_DIR, "watch.log")
+PID_FILE = os.path.join(LOG_DIR, "watch.pid")
+
+
+def env_num(name, default):
+    try:
+        return float(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return float(default)
+
+
+PORT = int(env_num("WATCH_PORT", 8799))          # heartbeat от лаунчера
+TICK = env_num("WATCH_TICK", 5)                  # период цикла наблюдения, с
+APP_TIMEOUT = env_num("APP_TIMEOUT", 90)         # пингов нет столько → приложение закрыто
+IDLE_LIMIT = env_num("IDLE_LIMIT", 7200)         # простой до выключения: 2 ч по умолчанию
+IDLE_LIMIT_MIN = 900                            # не короче 15 мин (внедрённый порог зажат)
+IDLE_LIMIT_MAX = 43200                          # и не длиннее 12 ч
+BUSY_WINDOW = env_num("BUSY_WINDOW", 30)         # окно наблюдения за CPU, с
+BUSY_CPU = env_num("BUSY_CPU", 1.5)              # CPU-секунд за окно = «занято»
+KILL_QUIET = env_num("KILL_QUIET", 120)          # тишина перед убийством Termux, с
+LOG_MAX = 256 * 1024
+
+# Процессы, чей CPU означает «система занята»:
+#   ассистент (TUI + его сервер), VS Code (code-server), прокси,
+#   главный процесс Termux (рендер его UI при вводе) и интерактивная оболочка.
+BUSY_PATTERNS = ("opencode2.bin", "lib/code-server", "zen-proxy.mjs")
+BUSY_NAMES = ("com.termux",)
+
+CLK = os.sysconf("SC_CLK_TCK") if hasattr(os, "sysconf") else 100.0
+
+STOP_FLAG = threading.Event()
+LOCK = threading.Lock()
+STATE = {
+    "seen": False,          # лаунчер хотя бы раз пинговал
+    "last_ping": time.time(),
+    "last_active": time.time(),   # последний ввод пользователя ('A')
+    "last_busy": time.time(),     # последнее заметное потребление CPU
+    "bg": False,            # последнее состояние: True — приложение в фоне ('B')
+    "fg_seen": False,       # лаунчер умеет слать 'F'/'B' (новая сборка APK)
+}
+
+
+# ------------------------------------------------------------------ утилиты
+
+def log(msg):
+    line = "%s %s\n" % (time.strftime("%m-%d %H:%M:%S"), msg)
+    try:
+        if not os.path.isdir(LOG_DIR):
+            os.makedirs(LOG_DIR, exist_ok=True)
+        if os.path.exists(LOG_FILE) and os.path.getsize(LOG_FILE) > LOG_MAX:
+            with open(LOG_FILE, "w") as f:
+                f.write("=== watch.log обрезан (был > %d КБ) ===\n" % (LOG_MAX // 1024))
+        with open(LOG_FILE, "a") as f:
+            f.write(line)
+    except Exception:
+        pass
+
+
+def _cpu_ticks(pid):
+    try:
+        st = open("/proc/%d/stat" % pid).read()
+    except Exception:
+        return 0
+    # pid (comm) state ... — comm может содержать пробелы/скобки, режем по последней ')'
+    fields = st[st.rfind(")") + 2:].split()
+    try:
+        return int(fields[11]) + int(fields[12])   # utime + stime
+    except (IndexError, ValueError):
+        return 0
+
+
+def busy_cpu_ticks():
+    """Суммарные utime+stime всех процессов, считающихся «работой системы»."""
+    total = 0
+    for path in glob.glob("/proc/[0-9]*"):
+        try:
+            raw = open(os.path.join(path, "cmdline"), "rb").read()
+        except Exception:
+            continue
+        argv = [a for a in raw.split(b"\0") if a]
+        if not argv:
+            continue
+        cmd = b" ".join(argv).decode("utf-8", "replace")
+        # name — str (раньше оставался bytes, и `name in BUSY_NAMES` со строками
+        # всегда было False → процесс com.termux никогда не считался «занятым»).
+        name = argv[0].rsplit(b"/", 1)[-1].decode("utf-8", "replace")
+        busy = any(p in cmd for p in BUSY_PATTERNS) or name in BUSY_NAMES
+        if not busy and name == "bash" and len(argv) > 1 and argv[1] == b"-l":
+            busy = True          # интерактивная оболочка Termux
+        if not busy:
+            continue
+        try:
+            total += _cpu_ticks(int(path.rsplit("/", 1)[-1]))
+        except ValueError:
+            pass
+    return total
+
+
+def run_stop(termux=False):
+    """Запускает OpenCode-Stop (с --termux — в конце убивает и Termux)."""
+    cmd = [STOP_SCRIPT] + (["--termux"] if termux else [])
+    log("выполняю: %s" % " ".join(cmd))
+    try:
+        subprocess.run(cmd, timeout=180, check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except Exception as exc:
+        log("стоп-скрипт не отработал: %r" % exc)
+        return False
+
+
+# ------------------------------------------------------------- heartbeat
+
+def listener():
+    """Принимает короткие heartbeat-соединения от лаунчера: 'P' / 'A'."""
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("127.0.0.1", PORT))
+    except OSError as exc:
+        log("порт %d занят (%r) — heartbeat выключен" % (PORT, exc))
+        return
+    srv.listen(8)
+    srv.settimeout(1.0)
+    log("heartbeat слушаю 127.0.0.1:%d" % PORT)
+    while not STOP_FLAG.is_set():
+        try:
+            conn, _addr = srv.accept()
+        except socket.timeout:
+            continue
+        except OSError:
+            break
+        try:
+            conn.settimeout(2.0)
+            data = conn.recv(32) or b""
+            try:
+                conn.sendall(b"O")          # подтверждение клиенту
+            except Exception:
+                pass
+            msg = data[:1].upper()
+            now = time.time()
+            if msg == b"R":
+                # Запрос лаунчера: перестроить порог простоя ('R<секунды>').
+                global IDLE_LIMIT
+                try:
+                    sec = float(data[1:].decode("utf-8", "replace").strip())
+                except ValueError:
+                    sec = None
+                if sec:
+                    sec = max(IDLE_LIMIT_MIN, min(IDLE_LIMIT_MAX, sec))
+                    with LOCK:
+                        first = not STATE["seen"]
+                        STATE["seen"] = True
+                        STATE["last_ping"] = now
+                        changed = abs(IDLE_LIMIT - sec) > 0.5
+                    if changed:
+                        IDLE_LIMIT = sec
+                        log("порог простоя теперь %.0f мин (задан шторкой лаунчера)"
+                            % (sec / 60.0))
+                continue
+            if msg in (b"P", b"A", b"F", b"B"):
+                with LOCK:
+                    first = not STATE["seen"]
+                    STATE["seen"] = True
+                    STATE["last_ping"] = now
+                    if msg == b"A":
+                        STATE["last_active"] = now
+                    elif msg == b"F":
+                        STATE["bg"] = False
+                        STATE["fg_seen"] = True
+                    elif msg == b"B":
+                        STATE["bg"] = True
+                        STATE["fg_seen"] = True
+                if first:
+                    log("лаунчер подключился (первый heartbeat)")
+                elif msg == b"B":
+                    log("лаунчер ушёл в фон — молчание больше не считаю смертью")
+                elif msg == b"F":
+                    log("лаунчер снова на экране")
+        except Exception:
+            pass
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    try:
+        srv.close()
+    except Exception:
+        pass
+
+
+# ------------------------------------------------------------- одиночный запуск
+
+def acquire_pidfile():
+    """True — мы единственный экземпляр сторожа."""
+    try:
+        if not os.path.isdir(LOG_DIR):
+            os.makedirs(LOG_DIR, exist_ok=True)
+        old = int(open(PID_FILE).read().strip())
+        os.kill(old, 0)                    # не бросилось — процесс жив
+        return False
+    except Exception:
+        pass
+    try:
+        with open(PID_FILE, "w") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+    return True
+
+
+def release_pidfile():
+    try:
+        with open(PID_FILE) as f:
+            if int(f.read().strip()) == os.getpid():
+                os.remove(PID_FILE)
+    except Exception:
+        pass
+
+
+def graceful_exit(*_args):
+    STOP_FLAG.set()
+    release_pidfile()
+    sys.exit(0)
+
+
+# ------------------------------------------------------------- наблюдение
+
+def snapshot():
+    with LOCK:
+        return (STATE["seen"], STATE["last_ping"], STATE["last_active"],
+                STATE["last_busy"], STATE["bg"], STATE["fg_seen"])
+
+
+def main_once():
+    """Один диагностический цикл без выключений (для --once/--status)."""
+    seen, last_ping, last_active, last_busy, bg, fg_seen = snapshot()
+    now = time.time()
+    print("port=%d seen=%s фон=%s умеет_F/B=%s пинг_назад=%.0fс ввод_назад=%.0fс cpu_назад=%.0fс"
+          % (PORT, seen, bg, fg_seen, now - last_ping, now - last_active, now - last_busy))
+    print("пороги: APP_TIMEOUT=%.0f IDLE_LIMIT=%.0f BUSY_CPU=%.1f/%.0fс KILL_QUIET=%.0f"
+          % (APP_TIMEOUT, IDLE_LIMIT, BUSY_CPU, BUSY_WINDOW, KILL_QUIET))
+    print("стоп-скрипт: %s (есть=%s)" % (STOP_SCRIPT, os.path.exists(STOP_SCRIPT)))
+    print("CPU сейчас: %d тиков (%.2f с)" % (busy_cpu_ticks(), busy_cpu_ticks() / CLK))
+    return 0
+
+
+def decide(seen, last_ping, last_active, last_busy, bg, fg_seen, now,
+           idle_limit=None):
+    """Чистая логика решения сторожа (без побочек) — удобно тестировать.
+
+    Возвращает ``(need_stop, app_gone, idle, activity)``.
+
+    * ``app_gone`` (приложение закрыто) — только если лаунчер умеет слать
+      'F'/'B' (``fg_seen``), последним состоянием было 'F' (``not bg``), пинги
+      молчат больше ``APP_TIMEOUT`` И ничего не работает (``not busy_recent``).
+      Фоновое молчание ('B') и молчание старой сборки без 'F'/'B' смертью НЕ
+      считается — именно это роняло работающую систему в фоне.
+    * ``idle`` (простой) — если за ``idle_limit`` секунд не было ни ввода
+      пользователя, ни работы сервисов.
+    """
+    if idle_limit is None:
+        idle_limit = IDLE_LIMIT
+    activity = max(last_active, last_busy)
+    busy_recent = (now - last_busy) <= max(BUSY_WINDOW, TICK * 2)
+    app_gone = (seen and fg_seen and (not bg) and (not busy_recent)
+                and (now - last_ping > APP_TIMEOUT))
+    idle = seen and (not busy_recent) and (now - activity > idle_limit)
+    return (app_gone or idle), app_gone, idle, activity
+
+
+def main():
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print(__doc__)
+        return 0
+    if "--status" in sys.argv:
+        try:
+            pid = int(open(PID_FILE).read().strip())
+            os.kill(pid, 0)
+            print("сторож работает, pid=%d" % pid)
+        except Exception:
+            print("сторож не запущен")
+        return 0
+    if "--once" in sys.argv:
+        return main_once()
+
+    if not acquire_pidfile():
+        print("сторож уже запущен — выхожу")
+        return 0
+
+    signal.signal(signal.SIGTERM, graceful_exit)
+    signal.signal(signal.SIGINT, graceful_exit)
+
+    log("OpenCode-Watch стартовал (pid=%d, idle=%.0fмин, порог_пинга=%.0fс)"
+        % (os.getpid(), IDLE_LIMIT / 60.0, APP_TIMEOUT))
+
+    t = threading.Thread(target=listener, name="ocl-heartbeat", daemon=True)
+    t.start()
+
+    prev_ticks = busy_cpu_ticks()
+    window_start = time.time()
+    accum = 0.0
+    stopped = False          # сервисы уже погашены этим сторожем
+    last_note = 0.0
+
+    try:
+        while not STOP_FLAG.is_set():
+            time.sleep(TICK)
+            now = time.time()
+            seen, last_ping, last_active, last_busy, bg, fg_seen = snapshot()
+
+            # --- CPU за окно наблюдения -----------------------------------
+            ticks = busy_cpu_ticks()
+            accum += max(0, ticks - prev_ticks) / CLK
+            prev_ticks = ticks
+            if now - window_start >= BUSY_WINDOW:
+                with LOCK:
+                    if accum >= BUSY_CPU:
+                        STATE["last_busy"] = now
+                        last_busy = now
+                    # ассистент/пользователь работают — сбрасываем и ввод,
+                    # чтобы простой не считался по «вводу» старше окна
+                accum = 0.0
+                window_start = now
+
+            activity = max(last_active, last_busy)
+            # Свежая нагрузка (в т.ч. ассистент, ждущий ответ сети) — система
+            # работает, ничего не гасим. Решение — в decide() (тестируется).
+            need_stop, app_gone, idle, activity = decide(
+                seen, last_ping, last_active, last_busy, bg, fg_seen, now)
+
+            if not need_stop:
+                if stopped:
+                    log("лаунчер снова работает — сторож вернулся в режим наблюдения")
+                    stopped = False
+                continue
+
+            if not stopped:
+                reason = ("приложение молчит %.0f с — оно закрыто/выброшено из реестра"
+                          % (now - last_ping)) if app_gone else \
+                         ("простой %.0f мин — ни пользователя, ни ассистента"
+                          % ((now - activity) / 60.0))
+                log("ВЫКЛЮЧЕНИЕ: %s" % reason)
+                run_stop(termux=False)
+                stopped = True
+                continue
+
+            # Сервисы погашены. Termux убиваем, только когда им никто не пользуется.
+            if now - activity >= KILL_QUIET:
+                log("Termux никем не занят %.0f с — убиваю сам Termux" % (now - activity))
+                run_stop(termux=True)
+                release_pidfile()
+                return 0                       # на деле нас убьют вместе с Termux
+            if now - last_note > 60:
+                last_note = now
+                log("сервисы погашены, жду тишины перед убийством Termux "
+                    "(%d с из %.0f)" % (int(now - activity), KILL_QUIET))
+    finally:
+        release_pidfile()
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except SystemExit:
+        raise
+    except Exception as exc:
+        log("OpenCode-Watch упал: %r" % exc)
+        raise

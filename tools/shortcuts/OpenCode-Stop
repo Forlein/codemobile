@@ -1,0 +1,107 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# OpenCode-Stop — гасит всё, что поднимал OpenCode-All:
+#   code-server (VS Code), zen-proxy, opencode (TUI + serve --service).
+#
+# Запускается из Android-обёртки OpenCodeLauncher через RUN_COMMAND intent
+# (кнопка «Выключить» в шторке либо автоматически при свайпе приложения
+# из списка задач). Работает в фоне, потому что процессы отвязаны от
+# сессии Termux (setsid/nohup) и переживают закрытие обёртки.
+#
+# Флаги:
+#   --termux  — ПОСЛЕ остановки сервисов убить и само приложение Termux
+#               (и все его процессы). Последний шаг скрипта: сам он вместе
+#               с Termux умирает, поэтому лог пишем ДО. Используется при
+#               полном выключении: кнопка Exit, свайп из реестра,
+#               сторож OpenCode-Watch (закрытие приложения / простой).
+#   --dry     — ничего не убивать, только показать, что было бы убито.
+#   -h/--help — справка.
+#
+# Без флагов — «мягкая» остановка: Termux продолжает жить (нужно для
+# кнопки Restart и для ручного запуска).
+
+PREFIX="/data/data/com.termux/files/usr"
+export PATH="$PREFIX/bin:$PREFIX/opt/nodejs-24/bin:$PATH"
+
+LOG_DIR="/data/data/com.termux/files/home/.cache/opencodelauncher"
+mkdir -p "$LOG_DIR"
+
+KILL_TERMUX=0
+DRY=0
+for a in "$@"; do
+    case "$a" in
+        --termux) KILL_TERMUX=1 ;;
+        --dry)    DRY=1 ;;
+        -h|--help)
+            sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'
+            exit 0 ;;
+        *) echo "неизвестный флаг: $a (см. --help)"; exit 2 ;;
+    esac
+done
+
+log() { echo "$(date '+%F %T') $*" >>"$LOG_DIR/stop.log"; }
+
+# PID главного процесса Termux (cmdline ровно "com.termux") — ищем сами,
+# а не pkill'ом: тот мог бы зацепить лишнее.
+termux_pids() {
+    local d cmd
+    for d in /proc/[0-9]*; do
+        [ -r "$d/cmdline" ] || continue
+        cmd=$(tr '\0' '\n' <"$d/cmdline" 2>/dev/null | head -n1)
+        [ "$cmd" = "com.termux" ] && echo "${d#/proc/}"
+    done
+    return 0
+}
+
+if [ "$DRY" = 1 ]; then
+    echo "--dry: погасил бы сервисы (opencode/zen-proxy/code-server)"
+    echo "--dry: Termux-процессы, которые были бы добиты с --termux:"
+    termux_pids | sed 's/^/    pid /'
+    echo "--dry: потом pkill -9 всех процессов с префиксом $PREFIX"
+    exit 0
+fi
+
+log "OpenCode-Stop: останавливаю сервисы (termux=$KILL_TERMUX)"
+
+# 1) opencode (TUI на pts/0 и фоновый serve --service)
+pkill -f 'libexec/opencode2/opencode2\.bin' 2>/dev/null
+
+# 2) zen-proxy
+pkill -f 'zen-proxy\.mjs' 2>/dev/null
+
+# 3) code-server: сначала дочерние bootstrap-fork (agentHost, ptyHost,
+#    fileWatcher, extensionHost), затем сам процесс и его lib/node-обёртку.
+pkill -f 'code-server.*bootstrap-fork' 2>/dev/null
+pkill -f 'lib/code-server/out/node/entry' 2>/dev/null
+pkill -f 'lib/code-server/lib/node .*lib/code-server' 2>/dev/null
+pkill -f '/lib/code-server' 2>/dev/null
+
+# Даём процессам пару секунд завершиться, затем добиваем жёстко то,
+# что осталось (иначе порт 8080 может остаться занятым до next-запуска).
+sleep 2
+pkill -9 -f 'libexec/opencode2/opencode2\.bin' 2>/dev/null
+pkill -9 -f 'zen-proxy\.mjs' 2>/dev/null
+pkill -9 -f '/lib/code-server' 2>/dev/null
+
+echo "$(date '+%F %T') OpenCode-Stop: сервисы остановлены" >>"$LOG_DIR/stop.log"
+
+# --- полное выключение (--termux): добиваем и само приложение Termux -------
+if [ "$KILL_TERMUX" = 1 ]; then
+    # 0) Сбрасываем wake-lock, который взял лаунчер перед запуском сервисов
+    #    (termux-wake-lock) — без этого система не уснёт даже с выключенными
+    #    процессами.
+    termux-wake-unlock >/dev/null 2>&1 || true
+
+    PIDS="$(termux_pids)"
+    log "OpenCode-Stop: убиваю Termux (главный процесс: ${PIDS:-не найден})"
+
+    # 1) Главный процесс Android-приложения Termux: по его смерти система
+    #    дополнительно прибьёт группу его процессов.
+    for p in $PIDS; do kill -9 "$p" 2>/dev/null || true; done
+    sleep 0.3
+
+    # 2) Страховка — всё, что уцелело в окружении Termux. Это ПОСЛЕДНИЙ шаг:
+    #    паттерн совпадает и с нами самиими, поэтому лог уже записан выше.
+    pkill -9 -f "$PREFIX" 2>/dev/null || true
+fi
+
+exit 0

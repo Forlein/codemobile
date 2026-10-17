@@ -1,0 +1,18 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "upstream": "https://opencode.ai/zen/v1",
+  "ua": "opencode/1.19.3",
+  "autoUA": true,
+  "uaRefreshMs": 21600000,
+  "injectSession": true,
+  "probeAuth": "auto",
+  "defaultModel": "",
+  "proxyKey": "",
+  "defaultZenKey": "",
+  "trustForwarded": false,
+  "timeoutMs": 120000,
+  "cacheMs": 30000,
+  "autoSync": true,
+  "autoSyncIntervalMs": 3600000
+}

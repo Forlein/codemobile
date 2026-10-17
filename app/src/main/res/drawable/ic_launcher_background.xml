@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Фон иконки: матовое стекло в стиле Apple — мягкий серый градиент.
+     Без «выжигающего» белого: только светлые серые Apple (F5F5F7 → E8E8ED → DDE1E7),
+     чтобы синий знак VS Code читался, а иконка не слепила глаза. -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    android:shape="rectangle">
+    <gradient
+        android:angle="135"
+        android:startColor="#FFF5F5F7"
+        android:centerColor="#FFE8E8ED"
+        android:endColor="#FFDDE1E7" />
+</shape>

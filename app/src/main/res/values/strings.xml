@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">VS Code</string>
+    <string name="start_url">http://127.0.0.1:8080</string>
+    <!-- Лаконичная метка автора — сплэш, заглушки, шторка выхода. -->
+    <string name="tag" translatable="false">@4rlein</string>
+</resources>

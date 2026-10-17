@@ -1,0 +1,40 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.opencodelauncher'
+    compileSdk 34
+    // В Termux распакован ровно этот build-tools — не даём AGP качать другой.
+    buildToolsVersion '34.0.0'
+
+    defaultConfig {
+        applicationId 'com.example.opencodelauncher'
+        minSdk 24
+        targetSdk 34
+        versionCode 46
+        versionName '1.0.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            shrinkResources false
+            // Релиз подписывается debug-ключом (signingConfigs.debug — встроенный).
+            signingConfig signingConfigs.debug
+        }
+        debug {
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+
+    lint {
+        abortOnError false
+        checkReleaseBuilds false
+    }
+}

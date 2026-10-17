@@ -1,0 +1,44 @@
+#!/data/data/com.termux/files/usr/bin/sh
+# opencode2 - wrapper for OpenCode 2 CLI on Android/Termux
+set -eu
+SELF="$(readlink -f "$0" 2>/dev/null || echo "$0")"
+DIR="$(CDPATH= cd -- "$(dirname "$SELF")" && pwd)"
+export PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+# watcher.node (parcel android-arm64) needs Termux libc++_shared.so; the
+# official Bun android base has no RUNPATH to $PREFIX/lib.
+export LD_LIBRARY_PATH="${PREFIX}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+# Stale var from pre-watcher builds (v2 ignored it anyway); never force-disable.
+unset OPENCODE_EXPERIMENTAL_DISABLE_FILEWATCHER || true
+# fff (native file finder) segfaults the server on some project content;
+# keep it off and use the ripgrep fallback (same UX, less RAM).
+export OPENCODE_DISABLE_FFF=1
+# --standalone by default for plain TUI launches: a private per-session server
+# instead of the shared background daemon (serve --service). The shared daemon
+# stays resident 24/7 holding ~700MB RSS even when idle (opencode#42271); with
+# --standalone the server dies with the TUI, reclaiming that RAM. Only applied
+# when no subcommand is given (flags-only args), so `serve`/`api`/`exec` etc.
+# still reach the binary untouched.
+ARGS="$@"
+case "${1:-}" in
+    ""|-*)
+        # No args, or only flags (e.g. --continue, -s <id>) → TUI launch.
+        has_subcmd=0
+        for a in "$@"; do
+            case "$a" in -*) ;; *) has_subcmd=1 ;; esac
+        done
+        [ "$has_subcmd" -eq 0 ] && ARGS="--standalone $*"
+        ;;
+esac
+
+for candidate in \
+    "$DIR/../libexec/opencode2/opencode2.bin" \
+    "$PREFIX/libexec/opencode2/opencode2.bin" \
+    "$DIR/opencode2.bin"
+do
+    if [ -x "$candidate" ]; then
+        # shellcheck disable=SC2086
+        exec "$candidate" $ARGS
+    fi
+done
+echo "opencode2: error: could not find opencode2.bin" >&2
+exit 127

@@ -1,0 +1,196 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# =============================================================================
+# codemobile — быстрый CLI для CodeMobile (VS Code + OpenCode в Termux).
+#
+#   codemobile start     поднять всё (code-server :8080, zen-proxy :8787, сторож)
+#   codemobile stop      погасить сервисы (Termux остаётся)
+#   codemobile restart   stop + start
+#   codemobile status    что запущено (порты + процессы)
+#   codemobile doctor    поиск типовых проблем и подсказки по решению
+#   codemobile models    обновить список бесплатных моделей zen-proxy в конфиге OpenCode
+#   codemobile logs      хвост логов сервисов
+#   codemobile update    обновить пакеты (code-server / opencode2)
+#   codemobile help
+# =============================================================================
+set -uo pipefail
+
+PREFIX="${PREFIX:-/data/data/com.termux/files/usr}"
+HOME_DIR="${HOME:-/data/data/com.termux/files/home}"
+export PATH="$PREFIX/bin:$PREFIX/opt/nodejs-24/bin:$PATH"
+
+ALL="$HOME_DIR/.shortcuts/OpenCode-All"
+STOP="$HOME_DIR/.shortcuts/OpenCode-Stop"
+LOG_DIR="$HOME_DIR/.cache/opencodelauncher"
+OPENCODE_CFG="$HOME_DIR/.config/opencode/opencode.json"
+ZEN_PORT=8787
+CODE_PORT=8080
+
+c_ok()   { printf '\033[32m%s\033[0m\n' "$*"; }
+c_warn() { printf '\033[33m%s\033[0m\n' "$*"; }
+c_err()  { printf '\033[31m%s\033[0m\n' "$*"; }
+c_dim()  { printf '\033[2m%s\033[0m\n' "$*"; }
+
+http_code() { curl -s -m 2 -o /dev/null -w '%{http_code}' "$1" 2>/dev/null || echo 000; }
+
+running() { [ "$(http_code "$1")" != "000" ]; }
+
+cmd_start() {
+    [ -f "$ALL" ] || { c_err "нет $ALL — запусти установщик: bash install.sh"; exit 1; }
+    echo "→ поднимаю сервисы…"
+    bash "$ALL"
+    for i in $(seq 1 30); do
+        running "http://127.0.0.1:$CODE_PORT/" && break
+        sleep 1
+    done
+    cmd_status
+}
+
+cmd_stop() {
+    [ -f "$STOP" ] || { c_err "нет $STOP"; exit 1; }
+    bash "$STOP" "${@:-}"
+    c_ok "Сервисы остановлены."
+}
+
+cmd_status() {
+    echo "── CodeMobile · статус ────────────────────────────"
+    local code zen
+    code="$(http_code "http://127.0.0.1:$CODE_PORT/")"
+    zen="$(http_code "http://127.0.0.1:$ZEN_PORT/")"
+    [ "$code" != "000" ] && c_ok  "  code-server  :$CODE_PORT  [up  $code]" \
+                         || c_warn "  code-server  :$CODE_PORT  [DOWN]"
+    [ "$zen"  != "000" ] && c_ok  "  zen-proxy    :$ZEN_PORT  [up  $zen]" \
+                         || c_warn "  zen-proxy    :$ZEN_PORT  [DOWN]"
+    if pgrep -f 'OpenCode-Watch' >/dev/null 2>&1; then
+        c_ok "  сторож       запущен"
+    else
+        c_warn "  сторож       не запущен"
+    fi
+    command -v opencode >/dev/null 2>&1 \
+        && c_ok "  opencode     $(opencode --version 2>/dev/null | head -1)" \
+        || c_warn "  opencode     не установлен"
+    echo "  VS Code:     http://127.0.0.1:$CODE_PORT"
+}
+
+cmd_logs() {
+    mkdir -p "$LOG_DIR"
+    local f="${1:-}"
+    if [ -z "$f" ]; then
+        for x in code-server zen-proxy watch stop; do
+            [ -f "$LOG_DIR/$x.log" ] && { echo "── $x.log ──"; tail -n 15 "$LOG_DIR/$x.log"; }
+        done
+    else
+        tail -n 40 "$LOG_DIR/$f.log"
+    fi
+}
+
+cmd_models() {
+    if ! running "http://127.0.0.1:$ZEN_PORT/v1/models"; then
+        c_warn "zen-proxy не отвечает — сначала: codemobile start"
+        return 1
+    fi
+    command -v node >/dev/null 2>&1 || { c_err "нет node"; return 1; }
+    node - "$OPENCODE_CFG" "$ZEN_PORT" <<'NODE'
+const fs = require("fs");
+const cfgPath = process.argv[2];
+const port = process.argv[3];
+(async () => {
+  const res = await fetch(`http://127.0.0.1:${port}/v1/models`);
+  const data = await res.json();
+  const ids = (data.data || data.models || [])
+    .map(m => m.id || m.name).filter(Boolean).sort();
+  let cfg = {};
+  if (fs.existsSync(cfgPath)) {
+    // мягкий парсинг (срезаем // комментарии и висячие запятые)
+    let t = fs.readFileSync(cfgPath, "utf8")
+      .replace(/\/\/[^\n]*/g, "").replace(/\/\*[\s\S]*?\*\//g, "")
+      .replace(/,(\s*[}\]])/g, "$1");
+    cfg = JSON.parse(t);
+  }
+  cfg.provider = cfg.provider || {};
+  const models = {};
+  for (const id of ids) models[id] = { name: id };
+  cfg.provider["zen-proxy"] = Object.assign(
+    { npm: "@ai-sdk/openai-compatible", name: "Zen Proxy · бесплатные",
+      options: { baseURL: `http://127.0.0.1:${port}/v1`, apiKey: "public" } },
+    cfg.provider["zen-proxy"] || {}, { models });
+  fs.mkdirSync(require("path").dirname(cfgPath), { recursive: true });
+  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2) + "\n");
+  console.log(`[ok] список моделей обновлён: ${ids.length} шт. → ${cfgPath}`);
+})().catch(e => { console.error("[XX]", e.message); process.exit(1); });
+NODE
+}
+
+cmd_doctor() {
+    echo "── CodeMobile · проверка окружения ────────────────"
+    local problems=0
+    # allow-external-apps
+    if grep -Eq '^[[:space:]]*allow-external-apps[[:space:]]*=[[:space:]]*true' \
+            "$HOME_DIR/.termux/termux.properties" 2>/dev/null; then
+        c_ok "  termux.properties: allow-external-apps = true"
+    else
+        c_warn "  [fix] нет allow-external-apps — лаунчер не запустит сервисы"
+        c_dim  "        решeние: bash install.sh  (или добавьте строку в ~/.termux/termux.properties + termux-reload-settings)"
+        problems=$((problems+1))
+    fi
+    # storage
+    [ -d "$HOME_DIR/storage" ] && c_ok "  доступ к памяти (storage) есть" \
+        || { c_warn "  [fix] нет ~/storage — выполните: termux-setup-storage"; problems=$((problems+1)); }
+    # node
+    if command -v node >/dev/null 2>&1; then
+        local nv; nv="$(node -e 'console.log(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)"
+        [ "$nv" -ge 18 ] 2>/dev/null && c_ok "  node $(node -v)" \
+            || { c_warn "  [fix] node < 18 → pkg install nodejs-lts"; problems=$((problems+1)); }
+    else
+        c_warn "  [fix] нет node → pkg install nodejs-lts"; problems=$((problems+1))
+    fi
+    command -v python3 >/dev/null 2>&1 && c_ok "  python3 есть" \
+        || { c_warn "  [fix] нет python3 → pkg install python"; problems=$((problems+1)); }
+    command -v code-server >/dev/null 2>&1 && c_ok "  code-server есть" \
+        || { c_warn "  [fix] нет code-server → pkg install tur-repo && pkg install code-server"; problems=$((problems+1)); }
+    # phantom process killer (Android 12+) — только подсказка
+    if [ -f "$HOME_DIR/rish" ] && [ -x "$HOME_DIR/rish" ]; then
+        local ppk
+        ppk="$(cd "$HOME_DIR" && ./rish settings get global settings_enable_monitor_phantom_procs 2>/dev/null)"
+        case "$ppk" in
+            false|0) c_ok "  phantom process killer выключен (Shizuku/rish)" ;;
+            *) c_warn "  [fix] phantom process killer ВКЛ — Android убивает фон Termux"
+               c_dim  "        смотри блок «Shizuku» ниже в выводе установщика"; problems=$((problems+1)) ;;
+        esac
+    else
+        c_dim "  (Shizuku/rish нет — если фон «отваливается», см. подсказки в install.sh)"
+    fi
+    # порты
+    if running "http://127.0.0.1:$CODE_PORT/"; then
+        c_ok "  code-server уже отвечает на :$CODE_PORT"
+    else
+        c_dim "  code-server сейчас не запущен (это нормально, если не начинали)"
+    fi
+    echo "───────────────────────────────────────────────────"
+    [ "$problems" -eq 0 ] && c_ok "Проблем не найдено." || c_warn "Найдено замечаний: $problems (см. [fix] выше)."
+}
+
+cmd_update() {
+    echo "→ обновляю tur-repo и пакеты…"
+    pkg install -y tur-repo >/dev/null 2>&1 || true
+    pkg upgrade -y code-server opencode2 nodejs-lts python 2>/dev/null \
+        || pkg install -y code-server opencode2 nodejs-lts python
+    [ -x "$PREFIX/bin/opencode2.bin" ] || true
+    # переустановить наш враппер (мог слететь при обновлении opencode)
+    local here; here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+    c_ok "Обновление завершено."
+}
+
+case "${1:-status}" in
+    start|up)     cmd_start ;;
+    stop|down)    shift; cmd_stop "$@" ;;
+    restart)      shift; cmd_stop; sleep 1; cmd_start ;;
+    status|st)    cmd_status ;;
+    doctor|check) cmd_doctor ;;
+    models)       cmd_models ;;
+    logs)         shift; cmd_logs "$@" ;;
+    update)       cmd_update ;;
+    help|-h|--help)
+        sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//' ;;
+    *)
+        c_err "неизвестная команда: $1"; echo; sed -n '3,16p' "$0" | sed 's/^# \{0,1\}//'; exit 2 ;;
+esac

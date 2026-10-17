@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- RunCommandService защищён этим разрешением. В Termux 0.118+ его
+         protectionLevel=0x01 (dangerous), поэтому MainActivity дополнительно
+         проверяет его и запрашивает у пользователя (см. ensureRunPermission). -->
+    <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+
+    <!-- Android 11+: видимость пакета com.termux для проверки «Termux установлен?» -->
+    <queries>
+        <package android:name="com.termux" />
+    </queries>
+
+    <application
+        android:name=".App"
+        android:label="@string/app_name"
+        android:icon="@mipmap/ic_launcher"
+        android:hardwareAccelerated="true"
+        android:usesCleartextTraffic="true"
+        android:allowBackup="true"
+        android:theme="@style/AppTheme">
+
+        <!-- «Невидимая» кнопка запуска: поднимает серверы в Termux и показывает code-server в WebView -->
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:clearTaskOnLaunch="true"
+            android:windowSoftInputMode="adjustResize"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|density|uiMode">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!-- «Невидимый» сервис: ловит onTaskRemoved (свайп из реестра задач)
+             и рассылает TASK_REMOVED, чтобы погасить code-server/zen-proxy/opencode. -->
+        <service
+            android:name=".ExitService"
+            android:exported="false" />
+    </application>
+
+</manifest>

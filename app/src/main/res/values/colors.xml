@@ -1,0 +1,51 @@
+<resources>
+    <!-- ============================================================
+         ХОЛОДНАЯ ПАЛИТРА APPLE (2.4) — оболочка и редкие экраны.
+         Источник правды: PALETTE.jsonc (корень проекта) + Apple_HIG_Palette.json.
+         Никаких тёплых/жёлтоватых тонов («старая бумага») — только
+         нейтральные холодные серые Apple.
+
+         Лестница светлых серых:
+           #F2F2F7 (Gray 6, базовый фон) → #E5E5EA (Gray 5) →
+           #D1D1D6 (Gray 4) → #C7C7CC (Gray 3, разделители).
+         Текст: #1D1D1F (Ink, основной) → #6E6E73 (Muted, вторичный) →
+           #8E8E93 (Gray 1, placeholder/подписи).
+         ============================================================ -->
+    <color name="apple_blue">#FF007AFF</color>        <!-- systemBlue — ссылки/кнопки (Light) -->
+    <color name="apple_blue_dark">#FF0A84FF</color>    <!-- акцентный синий для тёмной зоны -->
+    <color name="apple_blue_pressed">#FF0059CC</color> <!-- systemBlue, нажатие -->
+    <color name="apple_ink">#FF1D1D1F</color>          <!-- Apple Ink — основной текст -->
+    <color name="apple_gray_secondary">#FF6E6E73</color><!-- Muted — вторичный текст -->
+    <color name="apple_gray">#FF8E8E93</color>         <!-- Gray 1 — подписи/placeholder -->
+    <color name="apple_separator">#FFC7C7CC</color>    <!-- Gray 3 — рамки/разделители -->
+    <color name="apple_border">#FFD1D1D6</color>       <!-- Gray 4 — границы -->
+    <color name="apple_gray_fill">#FFE5E5EA</color>    <!-- Gray 5 — заливки оболочки -->
+    <color name="apple_gray_bg">#FFF2F2F7</color>      <!-- Gray 6 — фон панелей/списков -->
+    <color name="apple_gray_light">#FFF2F2F7</color>   <!-- светлый холодный, стекло -->
+    <color name="apple_white">#FFFFFFFF</color>        <!-- Apple White — фокус/хэндл -->
+
+    <!-- Акценты — только точечно (фокус, ошибки, предупреждения) -->
+    <color name="apple_orange">#FFBF5AF2</color>        <!-- предупреждения -->
+    <color name="apple_red">#FFFF3B30</color>           <!-- ошибки / удаление -->
+    <color name="apple_green">#FF34C759</color>         <!-- добавлено / git -->
+    <color name="apple_purple">#FFAF52DE</color>
+    <color name="apple_pink">#FFFF453A</color>          <!-- каретка / трейл -->
+
+    <!-- ============================================================
+         ТЁМНАЯ РАБОЧАЯ ЗОНА (код, терминал, дифф) — холодные серые Apple.
+         Здесь мы пишем и работаем → тёмные цвета, чистый белый текст.
+         Значения = токены dark_* из PALETTE.jsonc (единый источник).
+         ============================================================ -->
+    <color name="dark_editor">#FF232326</color>        <!-- dark_base — фон редактора -->
+    <color name="dark_panel">#FF1E1E20</color>         <!-- dark_mantle — панель/вкладки -->
+    <color name="dark_crust">#FF1C1C1E</color>         <!-- dark_crust — границы зоны -->
+    <color name="dark_text">#FFFFFFFF</color>          <!-- текст тёмной зоны — Label dark -->
+
+    <!-- Алиасы для темы/сплэша -->
+    <color name="vs_dark">#FF1C1C1E</color>            <!-- рабочая зона (холодный серый) -->
+    <color name="vs_blue">#FF007AFF</color>            <!-- акцент -->
+    <color name="splash_bg">#FFF2F2F7</color>          <!-- сплэш: холодный серый Apple -->
+    <color name="splash_text">#FF1D1D1F</color>        <!-- заголовок: Apple Ink -->
+    <color name="splash_muted">#FF6E6E73</color>       <!-- подпись -->
+    <color name="splash_tag">#FF8E8E93</color>         <!-- @4rlein — лаконичная метка -->
+</resources>

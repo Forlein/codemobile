@@ -1,0 +1,4 @@
+// Корневой build-файл проекта OpenCodeLauncher.
+plugins {
+    id 'com.android.application' version '9.3.3' apply false
+}

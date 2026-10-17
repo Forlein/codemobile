@@ -1,0 +1,19 @@
+<resources>
+    <!--
+        Тема приложения (2026-10-16: вся внешка снесена, остался дефолт
+        Material — окно непрозрачное, обои Android за ним НЕ видны.
+        Бэкап полной темы: backups/PRE_CLEANUP_20261016_205529/res-values).
+    -->
+    <style name="AppTheme" parent="@android:style/Theme.Material.NoActionBar.Fullscreen">
+        <!-- 2026-10-16: сквозная прозрачность (3.5) ВЫКЛЮЧЕНА при сносе внешки.
+             Фон окна — непрозрачный тёмный #1C1C1E (чтобы по краям экрана при
+             дробном DPR не просвечивали белые полосы). -->
+        <item name="android:windowBackground">@color/dark_crust</item>
+        <item name="android:colorAccent">@color/vs_blue</item>
+    </style>
+
+    <!-- Стиль сплэш-анимации: плавное появление логотипа. -->
+    <style name="SplashAnimation">
+        <item name="android:windowEnterAnimation">@anim/splash_fade_in</item>
+    </style>
+</resources>

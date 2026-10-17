@@ -1,0 +1,47 @@
+#!/data/data/com.termux/files/usr/bin/bash
+# OpenCode-All — поднимает все локальные сервисы, если они ещё не запущены.
+# Запускается из Android-обёртки OpenCodeLauncher через RUN_COMMAND intent,
+# поэтому все процессы нужно отвязать от сессии Termux (setsid/nohup).
+
+PREFIX="/data/data/com.termux/files/usr"
+HOME_DIR="/data/data/com.termux/files/home"
+export PATH="$PREFIX/bin:$PREFIX/opt/nodejs-24/bin:$PATH"
+
+LOG_DIR="$HOME_DIR/.cache/opencodelauncher"
+mkdir -p "$LOG_DIR"
+
+up() { curl -s -m 2 -o /dev/null "$1"; }
+
+# 1) code-server (VS Code в браузере) -> http://127.0.0.1:8080
+if ! up http://127.0.0.1:8080/; then
+    setsid nohup "$PREFIX/bin/code-server" \
+        --config "$HOME_DIR/.config/code-server/config.yaml" \
+        >>"$LOG_DIR/code-server.log" 2>&1 < /dev/null &
+    disown 2>/dev/null || true
+fi
+
+# 2) zen-proxy -> http://127.0.0.1:8787
+if ! up http://127.0.0.1:8787/; then
+    ZEN_DIR="$HOME_DIR/.zen-proxy"
+    [ -f "$ZEN_DIR/zen-proxy.mjs" ] || ZEN_DIR="$HOME_DIR/zen-proxy"
+    if [ -f "$ZEN_DIR/zen-proxy.mjs" ]; then
+        setsid nohup "$PREFIX/bin/node" "$ZEN_DIR/zen-proxy.mjs" \
+            >>"$LOG_DIR/zen-proxy.log" 2>&1 < /dev/null &
+        disown 2>/dev/null || true
+    else
+        echo "$(date '+%F %T') zen-proxy not found" >>"$LOG_DIR/zen-proxy.log"
+    fi
+fi
+
+# 3) сторож (OpenCode-Watch): heartbeat от лаунчера + авто-выключение по
+#    простоям (20 мин) и при смерти приложения. Идемпотентен — сам выходит,
+#    если уже запущен (pidfile), поэтому смело дёргаем при каждом старте.
+WATCH="$HOME_DIR/.shortcuts/OpenCode-Watch"
+if [ -f "$WATCH" ]; then
+    setsid nohup python3 "$WATCH" >/dev/null 2>&1 </dev/null &
+    disown 2>/dev/null || true
+else
+    echo "$(date '+%F %T') OpenCode-Watch not found" >>"$LOG_DIR/watch.log"
+fi
+
+exit 0
