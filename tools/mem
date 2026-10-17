@@ -190,8 +190,12 @@ function parseCfg(t) {
 }
 let c = {};
 try { c = parseCfg(fs.readFileSync(p, "utf8")); } catch {}
-c.plugin = Array.isArray(c.plugin) ? c.plugin : [];
-if (!c.plugin.includes("openkilo")) c.plugin.push("openkilo");
+// плагин openkilo (V1) несовместим с OpenCode 2 — вычищаем, если остался
+for (const key of ["plugin", "plugins"]) {
+  if (!Array.isArray(c[key])) continue;
+  c[key] = c[key].filter((x) => x !== "openkilo" && !(x && x.package === "openkilo"));
+  if (c[key].length === 0) delete c[key];
+}
 c.provider = c.provider || {};
 if (act === "del") {
   delete c.provider["zen-proxy"];
@@ -222,8 +226,11 @@ p, port, ids = sys.argv[1], sys.argv[2], sys.argv[3]
 try:
     with open(p, encoding="utf-8") as f: c = json.load(f)
 except Exception: c = {}
-c.setdefault("plugin", [])
-if "openkilo" not in c["plugin"]: c["plugin"].append("openkilo")
+# плагин openkilo (V1) несовместим с OpenCode 2 — вычищаем, если остался
+for _k in ("plugin", "plugins"):
+    if isinstance(c.get(_k), list):
+        c[_k] = [x for x in c[_k] if x != "openkilo" and not (isinstance(x, dict) and x.get("package") == "openkilo")]
+        if not c[_k]: del c[_k]
 prov = c.setdefault("provider", {})
 models = {i.strip(): {"name": i.strip()} for i in ids.split("\n") if i.strip()}
 old = prov.get("zen-proxy", {})

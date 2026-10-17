@@ -21,7 +21,7 @@
 | **Быстрый запуск** | Иконка «VS Code» → приложение само поднимает сервисы и открывает редактор |
 | **Терминал** | Встроенный терминал VS Code (xterm) + буфер обмена Android |
 | **ИИ‑ассистент** | `opencode` — запускается из терминала VS Code |
-| **Бесплатные модели** | Плагин `openkilo` (Kilo Gateway) + локальный прокси `zen-proxy` (opencode Zen free) |
+| **Бесплатные модели** | Локальный прокси `zen-proxy` (бесплатные модели OpenCode Zen, `127.0.0.1:8787`) |
 | **Оформление** | Светлая «Apple»-оболочка, матовая прозрачность диалогов, тёмная рабочая зона, курсор `#FF2D55` |
 | **Энергосбережение** | Сторож сам гасит сервисы по простою и при закрытии приложения |
 
@@ -112,7 +112,7 @@ sh get.sh --direct
 | Вопрос | Что делает |
 |---|---|
 | **ИИ‑ассистент OpenCode?** | ставит `opencode` (если уже есть — обновит, ничего не удаляя) |
-| ↳ **бесплатные модели?** | `openkilo` + `zen-proxy` с автонастройкой конфига |
+| ↳ **бесплатные модели?** | `zen-proxy` с автонастройкой конфига |
 | ↳ **Zen‑ключ?** | можно вставить сразу, а можно **пропустить** (Enter) — впишешь позже: `mem helper` |
 | **VS Code в браузере (code-server)?** | ставит сервер VS Code |
 | ↳ **оформление?** | применяет дизайн (матовая прозрачность, шрифты, курсор) |
@@ -201,13 +201,14 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
 1. **tur-repo** — репозиторий Termux с нужными пакетами;
 2. **python, nodejs, curl, unzip** — зависимости (git — по желанию, для разработки);
    их можно не ставить: сам проект уже скачан установщиком `get.sh`;
-3. **opencode2** — ИИ‑ассистент (пакет Termux); плюс наш враппер (`--standalone`);
-4. **openkilo** (плагин OpenCode) — 40+ бесплатных моделей Kilo Gateway, без ключа;
-5. **zen-proxy** (`github.com/12errh/zen-proxy`) — локальный прокси `:8787` к
+3. **opencode2** — ИИ‑ассистент: сборка OpenCode 2 под Android из стороннего
+   apt‑репозитория `opencode-android-apt` (в репозиториях Termux пакета нет);
+   плюс наш враппер (`--standalone`);
+4. **zen-proxy** (`github.com/12errh/zen-proxy`) — локальный прокси `:8787` к
    бесплатным моделям OpenCode Zen (ключ можно ввести при установке или позже
    через `mem helper`);
-6. **code-server** — сам VS Code в браузере (пакет Termux);
-7. **APK‑лаунчер** — из раздела **Releases** этого репозитория (файл `CodeMobile-*.apk`).
+5. **code-server** — сам VS Code в браузере (пакет Termux);
+6. **APK‑лаунчер** — из раздела **Releases** этого репозитория (файл `CodeMobile-*.apk`).
 
 Пароль к code-server генерируется случайно, лежит в
 `~/.config/code-server/config.yaml`.
@@ -234,7 +235,7 @@ termux-open "$HOME/storage/shared/Download/CodeMobile.apk"
   ```
 
 * **ИИ‑ассистент:** в VS Code открой терминал и запусти `opencode`.
-  Выбор модели — внутри. Бесплатные: провайдеры **OpenKilo** и **Zen Proxy**.
+  Выбор модели — внутри. Бесплатные модели — провайдер **Zen Proxy**.
 
 * **Нет ключа opencode.ai?** Пропусти его при установке и позже выполни
   `mem helper` — помощник объяснит, где взять ключ, и сам пропишет его:
@@ -264,7 +265,7 @@ tail -f ~/.cache/opencodelauncher/watch.log
 | `code-server` не отвечает | не поднят / упал | `codemobile start`, смотри `~/.cache/opencodelauncher/code-server.log` |
 | Всё «пропадает» в фоне | phantom process killer (Android 12+) | выключить через Shizuku (`codemobile doctor`) |
 | Нет бесплатных моделей | zen-proxy не запущен | `codemobile start`, затем `codemobile models` |
-| Бесплатные модели не отвечают («deprecated») | нет Zen‑ключа или free‑доступ изменился | `mem helper` (вставить ключ) или `mem status`; без ключа используй провайдер **OpenKilo** |
+| Бесплатные модели не отвечают («deprecated») | нет Zen‑ключа или free‑доступ изменился | `mem helper` (вставить ключ) или `mem status` |
 | Не устанавливается APK | нет разрешения | разреши Termux «установку приложений», либо открой файл из `Download/` |
 
 ---
@@ -344,7 +345,7 @@ codemobile/
 MIT — см. [LICENSE](LICENSE). Оригинальный автор: **@4rlein**.
 
 Сторонние компоненты: [code-server](https://github.com/coder/code-server) (MIT),
-[OpenCode](https://opencode.ai), [zen-proxy](https://github.com/12errh/zen-proxy) (MIT),
-[openkilo](https://github.com/AnganSamadder/openkilo) (MIT).
-Бесплатные модели предоставляются сторонними сервисами (Kilo Gateway, OpenCode Zen)
-и могут меняться/ограничиваться на их стороне.
+[OpenCode](https://opencode.ai), [zen-proxy](https://github.com/12errh/zen-proxy) (MIT).
+Пакет `opencode2` — сторонняя сборка OpenCode 2 под Android
+(`guysoft/opencode-termux`); бесплатные модели предоставляются OpenCode Zen
+и могут меняться/ограничиваться на стороне сервиса.

@@ -196,9 +196,18 @@ cmd_doctor() {
 cmd_update() {
     echo "→ обновляю tur-repo и пакеты…"
     pkg install -y tur-repo >/dev/null 2>&1 || true
+    # пакет opencode2 живёт в стороннем apt-репозитории (в Termux его нет)
+    local oc_list="$PREFIX/etc/apt/sources.list.d/opencode-android.list"
+    if ! grep -qs 'opencode-android-apt' "$oc_list" 2>/dev/null; then
+        mkdir -p "$(dirname "$oc_list")" 2>/dev/null
+        printf 'deb %s stable main\n' \
+            "${CODEMOBILE_OPENCODE_REPO:-https://opencode-android-apt.psmsword148.workers.dev}" \
+            >"$oc_list" 2>/dev/null
+        pkg update >/dev/null 2>&1 || true
+    fi
     pkg upgrade -y code-server opencode2 nodejs-lts python 2>/dev/null \
         || pkg install -y code-server opencode2 nodejs-lts python
-    [ -x "$PREFIX/bin/opencode2.bin" ] || true
+    [ -x "$PREFIX/libexec/opencode2/opencode2.bin" ] || true
     # переустановить наш враппер (мог слететь при обновлении opencode)
     local here; here="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
     c_ok "Обновление завершено."

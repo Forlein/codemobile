@@ -8,7 +8,7 @@
 #    2.  Доступ к памяти устройства (termux-setup-storage)
 #    3.  Базовые пакеты (tur-repo, python, node, curl, git, unzip)
 #    4.  OpenCode (ИИ-ассистент)                    — спрашивает, нужен ли
-#    5.  Бесплатные модели (OpenKilo + Zen-Proxy)   — автоконфиг
+#    5.  Бесплатные модели (Zen-Proxy)              — автоконфиг
 #        └ ключ opencode.ai можно ввести сразу или ПРОПУСТИТЬ (позже: mem helper)
 #    6.  VS Code в браузере (code-server)
 #    7.  Скрипты запуска + CLI `codemobile` + termux.properties
@@ -36,7 +36,7 @@
 #    -y, --yes        не задавать вопросов, ставить всё по умолчанию
 #    --dry            только показать, что будет сделано
 #    --no-opencode    не ставить OpenCode
-#    --no-models      без бесплатных моделей (OpenKilo/Zen-Proxy)
+#    --no-models      без бесплатных моделей (Zen-Proxy)
 #    --zen-key KEY    Zen-ключ для бесплатных моделей (иначе спросит / можно пропустить)
 #    --no-zen-key     не спрашивать ключ (вписать позже командой: mem helper)
 #    --no-code-server без code-server
@@ -248,8 +248,6 @@ function parseCfg(t) {
 let t = "";
 try { t = fs.readFileSync(p, "utf8"); } catch {}
 let cfg = parseCfg(t);
-cfg.plugin = Array.isArray(cfg.plugin) ? cfg.plugin : [];
-if (!cfg.plugin.includes("openkilo")) cfg.plugin.push("openkilo");
 cfg.provider = cfg.provider || {};
 if (!cfg.provider["zen-proxy"]) {
   cfg.provider["zen-proxy"] = {
@@ -278,6 +276,37 @@ let t = "";
 try { t = fs.readFileSync(p, "utf8"); } catch { process.exit(0); }
 let cfg = parseCfg(t);
 if (cfg.provider && cfg.provider["zen-proxy"]) delete cfg.provider["zen-proxy"];
+fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
+NODE
+}
+
+# ── Убрать несовместимый плагин openkilo ─────────────────────────────────────
+# Плагин `openkilo` (npm, v1.0.0) собран под V1 API плагинов OpenCode. В OpenCode 2
+# такие плагины не запускаются — при старте пишется «plugin failed: openkilo».
+# Поэтому вычищаем «openkilo» из `plugin`/`plugins` в конфиге (файл не удаляем).
+opencode_drop_openkilo() {     # opencode_drop_openkilo <opencode.json>
+    [ -f "$1" ] || return 0
+    node - "$1" <<'NODE' || return 1
+const fs = require("fs");
+const p = process.argv[2];
+function parseCfg(t) {
+  try { return JSON.parse(t); } catch {}
+  try {
+    return JSON.parse(
+      t.replace(/^\s*\/\/[^\n]*/gm, "").replace(/\/\*[\s\S]*?\*\//g, "")
+       .replace(/,(\s*[}\]])/g, "$1"));
+  } catch { return {}; }
+}
+let t = "";
+try { t = fs.readFileSync(p, "utf8"); } catch { process.exit(0); }
+const cfg = parseCfg(t);
+const isOpenkilo = (x) =>
+  x === "openkilo" || (x && typeof x === "object" && x.package === "openkilo");
+for (const key of ["plugin", "plugins"]) {
+  if (!Array.isArray(cfg[key])) continue;
+  cfg[key] = cfg[key].filter((x) => !isOpenkilo(x));
+  if (cfg[key].length === 0) delete cfg[key];
+}
 fs.writeFileSync(p, JSON.stringify(cfg, null, 2) + "\n");
 NODE
 }
@@ -811,12 +840,45 @@ task_build_apk() {
     bash tools/build_apk.sh --release --allow-existing $extra
 }
 
+# ── apt-источник пакета opencode2 ────────────────────────────────────────────
+# В репозиториях Termux пакета opencode2 нет: это отдельная сборка OpenCode 2
+# под Android/aarch64 (guysoft/opencode-termux), публикуемая через свой apt-репо.
+# Без этого источника `pkg install opencode2` падает с «Unable to locate package»
+# — установка шла, только если источник уже был добавлен вручную. Добавляем сами
+# (адрес можно переопределить: CODEMOBILE_OPENCODE_REPO=…).
+OPENCODE_REPO_URL="${CODEMOBILE_OPENCODE_REPO:-https://opencode-android-apt.psmsword148.workers.dev}"
+OPENCODE_REPO_LIST="$PREFIX/etc/apt/sources.list.d/opencode-android.list"
+
+opencode_repo_ensure() {
+    dpkg -s opencode2 >/dev/null 2>&1 && return 0
+    if [ "$DRY" = 1 ]; then
+        info "[dry] добавил бы apt-источник opencode2: $OPENCODE_REPO_LIST"
+        return 0
+    fi
+    if ! grep -qs 'opencode-android-apt' "$OPENCODE_REPO_LIST" 2>/dev/null; then
+        mkdir -p "$(dirname "$OPENCODE_REPO_LIST")" || return 1
+        [ -f "$OPENCODE_REPO_LIST" ] && cp -p "$OPENCODE_REPO_LIST" "$OPENCODE_REPO_LIST.bak" 2>/dev/null
+        printf 'deb %s stable main\n' "$OPENCODE_REPO_URL" >"$OPENCODE_REPO_LIST" || return 1
+        info "добавлен apt-источник opencode2 (сторонний): $OPENCODE_REPO_URL"
+        APT_REFRESHED=0
+        apt_refresh >/dev/null 2>&1 || true
+    fi
+    return 0
+}
+
 task_opencode() {
-    pkg_install opencode2 || return 1
+    opencode_repo_ensure
+    if ! pkg_install opencode2; then
+        warn "пакет opencode2 не установился (apt-источник недоступен?)"
+        warn "источник: deb $OPENCODE_REPO_URL stable main"
+        warn "проверь интернет и повтори: bash install.sh --yes"
+        install_file tools/opencode2 "$PREFIX/bin/opencode2" 755 || true
+        return 1
+    fi
     install_file tools/opencode2 "$PREFIX/bin/opencode2" 755
     [ -x "$PREFIX/libexec/opencode2/opencode2.bin" ] \
         && echo "бинарь на месте: $PREFIX/libexec/opencode2/opencode2.bin" \
-        || echo "нет opencode2.bin (установится пакетом; враппер подождёт)"
+        || echo "нет opencode2.bin (пакет встал неполностью — повтори установку)"
 }
 
 task_opencode_config() {
@@ -842,13 +904,14 @@ task_opencode_config() {
     else
         echo "провайдер Zen Proxy не трогаем (ключа нет); включить: mem helper"
     fi
-    # плагин openkilo (бесплатные модели Kilo Gateway)
-    npm install --prefix "$dir" openkilo >/dev/null 2>&1 \
-        && echo "openkilo установлен" || echo "openkilo: npm пропущен (opencode подтянет сам)"
+    # Плагин openkilo (V1) несовместим с OpenCode 2 — вычищаем его из конфига
+    # прошлых версий, иначе OpenCode пишет «plugin failed: openkilo» при старте.
+    opencode_drop_openkilo "$cfg" || warn "не удалось вычистить openkilo из конфига"
+    rm -rf "$dir/node_modules/openkilo" 2>/dev/null || true
     if [ -n "${ZEN_KEY:-}" ]; then
-        echo "провайдеры: openkilo (Kilo free) + zen-proxy (:8787)"
+        echo "провайдеры: zen-proxy (:8787) — бесплатные модели OpenCode Zen"
     else
-        echo "провайдеры: openkilo (Kilo free); zen-proxy — после mem helper"
+        echo "бесплатные модели: zen-proxy — подключатся после: mem helper"
     fi
 }
 
@@ -1066,7 +1129,7 @@ say ""
 say "${B}Что установить?${N} (Enter = значение по умолчанию)"
 [ "$WANT_OPENCODE"  = 2 ] && { ask_yn "Установить ИИ-ассистент OpenCode?" Y && WANT_OPENCODE=1 || WANT_OPENCODE=0; }
 if [ "$WANT_OPENCODE" = 1 ]; then
-    [ "$WANT_MODELS" = 2 ] && { ask_yn "  └ бесплатные модели (OpenKilo + Zen-Proxy) с автонастройкой?" Y && WANT_MODELS=1 || WANT_MODELS=0; }
+    [ "$WANT_MODELS" = 2 ] && { ask_yn "  └ бесплатные модели (Zen-Proxy) с автонастройкой?" Y && WANT_MODELS=1 || WANT_MODELS=0; }
     [ "$WANT_MODELS" = 1 ] && prompt_zen_key
 else
     WANT_MODELS=0

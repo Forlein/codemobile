@@ -253,7 +253,7 @@ build‑tools 36.0.0) и Gradle‑кэш. Первая сборка идёт с 
 | Бесконечное «подключение» в приложении | не включён `allow-external-apps` | `bash install.sh` (сам допишет) → `termux-reload-settings` |
 | Всё «пропадает» в фоне | phantom process killer (Android 12+) | выключить через Shizuku — см. `codemobile doctor` |
 | Нет бесплатных моделей | `zen-proxy` не поднят | `codemobile start`, потом `codemobile models` |
-| Бесплатные модели не отвечают («deprecated»/gated) | нет Zen‑ключа | `mem helper` (вставить ключ) или `mem status`; без ключа — провайдер **OpenKilo** |
+| Бесплатные модели не отвечают («deprecated»/gated) | нет Zen‑ключа | `mem helper` (вставить ключ) или `mem status` |
 | Не ставится APK | нет разрешения «Установка приложений» | Настройки → Приложения → Termux → Установка приложений → Разрешить; либо открой файл из `Download/` |
 | `Permission denied` на `/storage/emulated/0` | нет доступа к памяти | `termux-setup-storage`; HyperOS: разрешение «Файлы и медиа → Управление всеми файлами» |
 | Termux убивается в фоне (Xiaomi) | агрессивная экономия | Автозапуск ВКЛ, «Без ограничений» по батарее, замок на карточке в недавних |
