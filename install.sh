@@ -213,6 +213,116 @@ run_step() {                 # run_step <номер> <метка> <функци�
 
 FAILS=0
 
+# ═══════════════════════════════════════════════════════════════════════════
+#  Самовосстановление: репозитории Termux, имена пакетов, устройство, сеть
+#  Пользователь ставит Termux и даёт доступ к файлам — остальное скрипт
+#  выясняет про систему сам и обходит её различия без вопросов.
+# ═══════════════════════════════════════════════════════════════════════════
+DEV_ARCH=""; DEV_API=""; TERMUX_VER=""
+APT_BIN=""; APT_REFRESHED=0
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || true)"
+# Официальные зеркала репозитория Termux (в порядке предпочтения).
+APT_MIRRORS=(
+    "https://packages.termux.dev/apt/termux-main"
+    "https://packages-cf.termux.dev/apt/termux-main"
+    "https://grimler.se/termux/termux-main"
+    "https://mirror.mwt.me/termux/main"
+)
+
+detect_device() {
+    DEV_ARCH="$(uname -m 2>/dev/null || echo '?')"
+    TERMUX_VER="${TERMUX_VERSION:-?}"
+    DEV_API="$(getprop ro.build.version.sdk 2>/dev/null | tr -cd '0-9')"
+    [ -n "$DEV_API" ] || DEV_API="?"
+}
+
+apt_bin() {
+    [ -n "$APT_BIN" ] && return 0
+    if command -v apt >/dev/null 2>&1; then APT_BIN=apt
+    elif command -v pkg >/dev/null 2>&1; then APT_BIN=pkg
+    else return 1; fi
+}
+
+apt_dpkg_heal() {                       # добить прерванные установки (dpkg lock)
+    command -v dpkg >/dev/null 2>&1 && dpkg --configure -a >/dev/null 2>&1 || true
+    return 0
+}
+
+_apt_update() {                         # _apt_update <секунды> [флаги…] → вывод
+    local t="$1"; shift
+    if [ -n "$TIMEOUT_BIN" ]; then LC_ALL=C "$TIMEOUT_BIN" "$t" "$APT_BIN" update "$@" 2>&1
+    else LC_ALL=C "$APT_BIN" update "$@" 2>&1; fi
+}
+
+# apt возвращает 0 даже при сбое скачивания, поэтому судим по выводу и по тому,
+# появились ли файлы индекса (*_Packages) в изолированном каталоге.
+apt_iso_ok() {                          # apt_iso_ok <секунды> <sourcelist-файл>
+    local ld out okres=1
+    ld="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/codemobile-apt.XXXXXX")" || return 1
+    out="$(_apt_update "$1" -o Dir::Etc::sourcelist="$2" \
+               -o Dir::Etc::sourceparts="-" -o Dir::State::lists="$ld")"
+    grep -qiE 'failed to (fetch|download)' <<<"$out" && okres=0
+    find "$ld" -name '*_Packages*' 2>/dev/null | grep -q . || okres=0
+    rm -rf "$ld"
+    [ "$okres" = 1 ]
+}
+
+apt_fix_mirror() {                      # переключить основной репо на рабочее зеркало
+    local sl="$PREFIX/etc/apt/sources.list" m try
+    [ -w "$sl" ] || [ -w "$(dirname "$sl")" ] || return 1
+    try="$PREFIX/etc/apt/codemobile-mirror.list"
+    for m in "${APT_MIRRORS[@]}"; do
+        printf 'deb %s stable main\n' "$m" >"$try" 2>/dev/null || continue
+        if apt_iso_ok 180 "$try"; then
+            [ -f "$sl.codemobile.bak" ] || cp -p "$sl" "$sl.codemobile.bak" 2>/dev/null
+            printf 'deb %s stable main\n' "$m" >"$sl"
+            rm -f "$try"
+            ok "репозиторий Termux переключён на $m"
+            return 0
+        fi
+    done
+    rm -f "$try"
+    return 1
+}
+
+apt_refresh() {
+    [ "$APT_REFRESHED" = 1 ] && return 0
+    apt_bin || return 1
+    apt_dpkg_heal
+    info "обновляю списки пакетов Termux…"
+    local out; out="$(_apt_update 300)"
+    if ! grep -qiE 'failed to (fetch|download)' <<<"$out"; then APT_REFRESHED=1; return 0; fi
+    # Сбои были: если основной репо жив — виноваты сторонние (tur/opencode).
+    if apt_iso_ok 180 "$PREFIX/etc/apt/sources.list"; then APT_REFRESHED=1; return 0; fi
+    warn "основной репозиторий Termux не отвечает — подбираю рабочее зеркало…"
+    if apt_fix_mirror; then _apt_update 300 >/dev/null 2>&1 || true; APT_REFRESHED=1; return 0; fi
+    warn "репозитории Termux недоступны — продолжаю"
+    return 1
+}
+
+pkg_install() {                         # pkg_install <пакеты…>
+    apt_bin || return 1
+    [ "$APT_REFRESHED" = 1 ] || apt_refresh >/dev/null 2>&1 || true
+    if [ -n "$TIMEOUT_BIN" ]; then "$TIMEOUT_BIN" 900 "$APT_BIN" install -y "$@"
+    else "$APT_BIN" install -y "$@"; fi
+}
+
+# Поставить пакет, перебрав варианты имени: в разных сборках Termux они разные
+# (nodejs-lts ↔ nodejs, python ↔ python3, openjdk-21 ↔ openjdk-17).
+pkg_ensure() {                          # pkg_ensure <проверка-команда> <пакет…>
+    local chk="$1"; shift
+    command -v "$chk" >/dev/null 2>&1 && return 0
+    local i p
+    for i in 1 2; do
+        for p in "$@"; do
+            pkg_install "$p" >/dev/null 2>&1 || continue
+            command -v "$chk" >/dev/null 2>&1 && return 0
+        done
+        apt_dpkg_heal
+    done
+    return 1
+}
+
 # ── Bootstrap: если запущено из pipe (`curl | bash`), tools/ рядом нет ───────
 #     Скачиваем архив проекта сами: git и python для этого не нужны.
 #     Зеркало → зеркало: если GitHub недоступен, пробуем ghproxy/gh-proxy/ghfast.
@@ -230,8 +340,7 @@ ensure_dl() {
     pick_dl
     [ -n "$DL_TOOL" ] && return 0
     info "нет curl/wget/python3 — доставляю curl пакетом…"
-    (command -v pkg >/dev/null 2>&1 && pkg install -y curl) \
-     || (command -v apt >/dev/null 2>&1 && apt install -y curl) || true
+    pkg_ensure curl curl || true
     pick_dl
     [ -n "$DL_TOOL" ] && return 0
     err "нечем качать: поставь curl → pkg install curl"
@@ -244,11 +353,13 @@ cm_download() {                      # cm_download <url> <файл>
     case "$DL_TOOL" in
         curl)
             if [ -t 1 ]; then
-                curl -fL --progress-bar --retry 3 --retry-delay 2 \
+                curl -fL --progress-bar --retry 4 --retry-delay 2 \
+                     --speed-limit 1024 --speed-time 45 \
                      --connect-timeout 20 --max-time 900 -o "$file" "$url"
             else
-                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 \
-                     --max-time 900 -o "$file" "$url"
+                curl -fsSL --retry 4 --retry-delay 2 \
+                     --speed-limit 1024 --speed-time 45 \
+                     --connect-timeout 20 --max-time 900 -o "$file" "$url"
             fi ;;
         wget) wget -O "$file" --tries=3 --timeout=30 -q --show-progress "$url" ;;
         python3)
@@ -304,28 +415,23 @@ bootstrap_self() {
     say "${DIM}Bootstrap: исходников рядом нет — скачиваю архив проекта…${N}"
     ensure_dl || return 1
 
-    local tmp arc urls u kind
+    local tmp
     tmp="$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/codemobile.XXXXXX")" || return 1
-    arc="$tmp/repo.tar.gz"
-    urls="$(archive_urls "archive/refs/heads/$GITHUB_BRANCH.tar.gz")"
 
-    local got=0
-    while IFS= read -r u; do
-        [ -n "$u" ] || continue
-        info "пробую: $u"
-        if cm_download "$u" "$arc" && gzip -t "$arc" >/dev/null 2>&1; then got=1; break; fi
-        warn "не вышло — пробую следующее зеркало…"
-    done <<<"$urls"
-    if [ "$got" != 1 ]; then
+    local arc; arc="$(fetch_archive "$tmp")"
+    if [ -z "$arc" ]; then
         err "не удалось скачать $GITHUB_REPO ($GITHUB_BRANCH) ни с GitHub, ни с зеркал"
         rm -rf "$tmp"
         return 1
     fi
 
     mkdir -p "$SRC_DIR" || { rm -rf "$tmp"; return 1; }
-    tar -xzf "$arc" -C "$tmp" || { rm -rf "$tmp"; return 1; }
+    case "$arc" in
+        *.zip) unzip -qq "$arc" -d "$tmp" || { rm -rf "$tmp"; return 1; } ;;
+        *)     tar -xzf "$arc" -C "$tmp"  || { rm -rf "$tmp"; return 1; } ;;
+    esac
     # в архиве один каталог верхнего уровня: repo-branch
-    local top=""
+    local top="" kind
     for kind in "$tmp"/*/; do [ -d "$kind" ] && { top="$kind"; break; }; done
     if [ -z "$top" ] || [ ! -f "$top/install.sh" ]; then
         err "в архиве нет каталога проекта (ветка $GITHUB_BRANCH верная?)"
@@ -336,6 +442,58 @@ bootstrap_self() {
     rm -rf "$tmp"
     say "${G}✓${N} исходники в $SRC_DIR"
     CODEMOBILE_SRC="$SRC_DIR" exec bash "$SRC_DIR/install.sh" "$@"
+}
+
+# ── Сеть: замер зеркал, проверка архива, авто-фолбэк tar.gz → zip ────────────
+_archive_ok() {                         # _archive_ok <файл> <tar|zip>
+    local f="$1" kind="$2" magic sz
+    [ -s "$f" ] || return 1
+    sz="$(wc -c <"$f" 2>/dev/null | tr -d ' ')"
+    [ -n "$sz" ] && [ "$sz" -gt 2048 ] || return 1
+    magic="$(dd if="$f" bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')"
+    case "$magic" in 3c*) return 1 ;; esac          # '<' — HTML-заглушка прокси
+    if [ "$kind" = zip ]; then
+        case "$magic" in 504b) ;; *) return 1 ;; esac
+        unzip -tqq "$f" >/dev/null 2>&1
+    else
+        case "$magic" in 1f8b) ;; *) return 1 ;; esac
+        gzip -t "$f" >/dev/null 2>&1
+    fi
+}
+
+order_urls() {                          # stdin: URL-ы → stdout: быстрые первыми
+    local u t
+    [ "$DL_TOOL" = curl ] || { cat; return 0; }
+    while IFS= read -r u; do
+        [ -n "$u" ] || continue
+        t="$(curl -o /dev/null -s -w '%{time_total}' -r 0-2047 \
+                  --connect-timeout 3 --max-time 5 -fL "$u" 2>/dev/null)" || t=9.9
+        printf '%s %s\n' "${t:-9.9}" "$u"
+    done | sort -n | awk '{ print $2 }'
+}
+
+# Скачать архив проекта: перебирает tar.gz, затем zip, по быстрым зеркалам.
+fetch_archive() {                       # fetch_archive <tmpdir> → путь к архиву
+    local tmp="$1" kind tail arc urls u
+    for kind in tar zip; do
+        if [ "$kind" = zip ]; then tail="archive/refs/heads/$GITHUB_BRANCH.zip";     arc="$tmp/repo.zip"
+        else                        tail="archive/refs/heads/$GITHUB_BRANCH.tar.gz"; arc="$tmp/repo.tar.gz"; fi
+        urls="$(archive_urls "$tail")"
+        if [ "$DL_TOOL" = curl ]; then
+            info "замеряю зеркала и выбираю быстрейшее…" >&2
+            urls="$(printf '%s\n' "$urls" | order_urls)"
+        fi
+        while IFS= read -r u; do
+            [ -n "$u" ] || continue
+            info "пробую: $u" >&2
+            if cm_download "$u" "$arc" && _archive_ok "$arc" "$kind"; then
+                printf '%s\n' "$arc"; return 0
+            fi
+            warn "не вышло — пробую следующее зеркало…" >&2
+        done <<<"$urls"
+        [ "$kind" = tar ] && warn "tar.gz не удалось — пробую zip-архив…" >&2
+    done
+    return 1
 }
 
 # ── install_file SRC DST MODE — идемпотентная установка ──────────────────────
@@ -356,21 +514,57 @@ task_env() {
     [ -d "$PREFIX" ] || { echo "PREFIX=$PREFIX не найден — это не Termux?"; return 1; }
     command -v pkg >/dev/null 2>&1 || command -v apt >/dev/null 2>&1 \
         || { echo "нет pkg/apt — это не Termux?"; return 1; }
-    echo "Termux OK: $PREFIX"
+    detect_device
+    echo "Termux OK: $PREFIX · $DEV_ARCH · Android API $DEV_API · Termux $TERMUX_VER"
 }
 
+# Доступ к памяти устройства. Диалог Android требует одного нажатия «Разрешить»,
+# поэтому ждём его появления (до 30 с), а не фиксированную паузу.
 task_storage() {
-    if [ -d "$HOME_DIR/storage" ]; then echo "доступ к памяти уже есть"; return 0; fi
-    command -v termux-setup-storage >/dev/null 2>&1 || { echo "нет termux-setup-storage"; return 0; }
-    echo "запрашиваю доступ к памяти устройства…"
+    local st="$HOME_DIR/storage" i
+    if [ -d "$st/shared" ]; then
+        echo "доступ к памяти уже есть"; _storage_probe; return 0
+    fi
+    command -v termux-setup-storage >/dev/null 2>&1 \
+        || { echo "нет termux-setup-storage (это точно Termux?)"; return 0; }
+    echo "запрашиваю доступ к памяти — на экране подтверди «Разрешить»…"
     termux-setup-storage >/dev/null 2>&1 || true
-    for _ in $(seq 1 8); do [ -d "$HOME_DIR/storage" ] && break; sleep 1; done
-    [ -d "$HOME_DIR/storage" ] && echo "доступ есть" || echo "доступ не получен (можно позже: termux-setup-storage)"
+    for i in $(seq 1 30); do [ -d "$st/shared" ] && break; sleep 1; done
+    if [ -d "$st/shared" ]; then
+        echo "доступ есть"; _storage_probe
+    else
+        echo "[!!] доступ к памяти пока не получен — установка продолжится,"
+        echo "     но APK не попадёт в Download. Позже: termux-setup-storage"
+        _storage_hint
+    fi
     return 0
 }
 
+_storage_probe() {                      # можно ли писать в общий Download
+    local d="$HOME_DIR/storage/shared/Download"
+    if [ -d "$d" ] && : >"$d/.codemobile-write-test" 2>/dev/null; then
+        rm -f "$d/.codemobile-write-test" 2>/dev/null
+        echo "запись в Download: ок"
+    else
+        echo "запись в Download недоступна (возможно, нужен доступ «Все файлы»)"
+    fi
+}
+
+_storage_hint() {                       # подсказка с учётом версии Android
+    echo "  Android ${DEV_API}: Настройки → Приложения → Termux → Разрешения →"
+    echo "  «Файлы и медиа/Хранилище» → «Управление всеми файлами», затем"
+    echo "  termux-setup-storage. На HyperOS/MIUI — «Всегда разрешать»."
+}
+
 task_pkg() {
-    pkg install -y tur-repo || return 1
+    apt_refresh || true
+    # tur-repo нужен части пакетов; если не встал — установку не валим.
+    if ! dpkg -s tur-repo >/dev/null 2>&1; then
+        pkg_install tur-repo || echo "[!!] tur-repo не встал (продолжаю)"
+        APT_REFRESHED=0
+        apt_refresh || true
+    fi
+    echo "tur-repo: $(dpkg -s tur-repo >/dev/null 2>&1 && echo 'установлен' || echo 'нет')"
 }
 
 # ── Зависимости ──────────────────────────────────────────────────────────────
@@ -378,31 +572,16 @@ task_pkg() {
 # только части сценариев, а python и node — для ИИ-ассистента и оформления.
 # Python/node НЕ нужны для скачивания проекта (это делает bootstrap сам).
 task_deps() {
-    local essential="python nodejs-lts curl unzip tar gzip"
-    local optional="git"
-    local p missing=""
-    for p in $essential; do
-        case "$p" in
-            python) command -v python3 >/dev/null 2>&1 && continue ;;
-            nodejs-lts) command -v node >/dev/null 2>&1 && continue ;;
-            *) command -v "$p" >/dev/null 2>&1 && continue ;;
-        esac
-        missing="$missing $p"
-    done
-    if [ -n "$missing" ]; then
-        echo "нужны пакеты Termux: python — оформление и мерж настроек,"
-        echo "nodejs — ИИ-ассистент и бесплатные модели, unzip/tar — архивы."
-        echo "доставляю:$missing"
-        # shellcheck disable=SC2086
-        pkg install -y $missing || {
-            for p in $missing; do
-                pkg install -y "$p" || echo "[!!] не поставился: $p (продолжаю)"
-            done
-        }
-    fi
-    for p in $optional; do
-        command -v "$p" >/dev/null 2>&1 || pkg install -y "$p" >/dev/null 2>&1 || true
-    done
+    apt_refresh
+    echo "нужны пакеты Termux: python — оформление и мерж настроек,"
+    echo "node — ИИ-ассистент и бесплатные модели, unzip/tar — архивы."
+    pkg_ensure curl    curl              || true
+    pkg_ensure python3 python            || echo "[!!] python не встал — оформление пропустится"
+    pkg_ensure node    nodejs-lts nodejs || echo "[!!] node не встал — ИИ-ассистенту понадобится позже"
+    pkg_ensure unzip   unzip             || true
+    pkg_ensure tar     tar               || true
+    pkg_ensure gzip    gzip              || true
+    pkg_ensure git     git               || true
     command -v curl >/dev/null 2>&1 || { echo "нет curl — скачивание с зеркал будет недоступно"; }
     command -v python3 >/dev/null 2>&1 && python3 --version
     command -v node >/dev/null 2>&1 && node -v
@@ -411,11 +590,15 @@ task_deps() {
 
 # ── Режим сборки: JDK 21 + нативный aapt2 ────────────────────────────────────
 task_toolchain() {
-    # JDK 21 (AGP 9.x требует 17+). aapt2 ставим ИЗ TERMUX: версия из Maven/SDK
-    # собрана под x86_64 и на телефоне (arm64) не запускается.
-    pkg install -y openjdk-21 aapt2 unzip || return 1
-    command -v java  >/dev/null 2>&1 || { echo "нет java"; return 1; }
-    command -v aapt2 >/dev/null 2>&1 || { echo "нет aapt2"; return 1; }
+    # JDK 21 (AGP 9.x требует 17+) — версии перебираем. aapt2 ставим ИЗ TERMUX:
+    # версия из Maven/SDK собрана под x86_64 и на телефоне (arm64) не стартует.
+    pkg_ensure java  openjdk-21 openjdk-17 || { echo "нет java (JDK)"; return 1; }
+    pkg_ensure aapt2 aapt2 || { echo "нет aapt2"; return 1; }
+    pkg_ensure unzip unzip || true
+    if [ -z "${JAVA_HOME:-}" ] || [ ! -d "${JAVA_HOME:-/nonexistent}" ]; then
+        local d
+        for d in "$PREFIX"/lib/jvm/*/; do [ -d "$d" ] && JAVA_HOME="${d%/}" && break; done
+    fi
     export JAVA_HOME="${JAVA_HOME:-$PREFIX/lib/jvm/java-21-openjdk}"
     java -version
     aapt2 version
@@ -474,7 +657,7 @@ task_build_apk() {
 }
 
 task_opencode() {
-    pkg install -y opencode2 || return 1
+    pkg_install opencode2 || return 1
     install_file tools/opencode2 "$PREFIX/bin/opencode2" 755
     [ -x "$PREFIX/libexec/opencode2/opencode2.bin" ] \
         && echo "бинарь на месте: $PREFIX/libexec/opencode2/opencode2.bin" \
@@ -542,7 +725,7 @@ task_zenproxy() {
 }
 
 task_codeserver() {
-    pkg install -y code-server || return 1
+    pkg_install code-server || return 1
     local cfg="$HOME_DIR/.config/code-server/config.yaml"
     if [ ! -f "$cfg" ]; then
         local pw; pw="$(LC_ALL=C tr -dc '0-9' </dev/urandom | head -c 6)"
@@ -601,7 +784,8 @@ task_design() {
 }
 
 task_apk() {
-    local dl="$HOME_DIR/storage/shared/Download"; [ -d "$dl" ] || dl="$(mktemp -d)"
+    local dl="$HOME_DIR/storage/shared/Download"
+    [ -d "$dl" ] || dl="$HOME_DIR"          # нет доступа к памяти — кладём в ~
     local apk=""
     # 1) локальная сборка (режим разработчика)
     for cand in "${CODEMOBILE_APK:-}" app/build/outputs/apk/release/app-release.apk \
@@ -625,7 +809,15 @@ task_apk() {
             apk="$dl/CodeMobile-latest.apk"
             echo "качаю APK: $url"
             ensure_dl >/dev/null 2>&1
-            cm_download "$url" "$apk" >/dev/null 2>&1 || apk=""
+            # Релизные файлы GitHub поддерживают докачку (в отличие от архива
+            # исходников) → -C - позволяет продолжить после обрыва сети.
+            if [ "$DL_TOOL" = curl ]; then
+                : >>"$apk"
+                curl -fL --retry 4 --retry-delay 2 -C - --connect-timeout 20 \
+                     --max-time 1800 -o "$apk" "$url" >/dev/null 2>&1 || apk=""
+            else
+                cm_download "$url" "$apk" >/dev/null 2>&1 || apk=""
+            fi
         fi
     fi
     if [ -z "$apk" ] || [ ! -f "$apk" ]; then
@@ -635,30 +827,62 @@ task_apk() {
     fi
     ok "APK: $apk ($(du -h "$apk" | cut -f1))"
     if [ "$DRY" = 1 ]; then info "[dry] запустил бы установку $apk"; return 0; fi
-    # 1) pm — сработает, только если у Termux есть shell-права (root/Shizuku/adb).
-    #    На стоковом Android это обычно НЕ так, поэтому проверяем результат по факту.
-    if command -v pm >/dev/null 2>&1 && pm install -r "$apk" >/dev/null 2>&1 \
-        && pm list packages 2>/dev/null | grep -q "^package:$PKG_APP\$"; then
-        ok "APK установлен через pm (иконка появится в меню)"
+    # 1) shell-права: root/adb или Shizuku (rish) — ставим без диалога
+    local pmbin=""
+    command -v pm >/dev/null 2>&1 && pmbin="pm"
+    if [ -z "$pmbin" ]; then
+        if   [ -x "$HOME_DIR/rish" ]; then pmbin="$HOME_DIR/rish pm"
+        elif command -v rish >/dev/null 2>&1; then pmbin="rish pm"
+        fi
+    fi
+    if [ -n "$pmbin" ] && $pmbin install -r "$apk" >/dev/null 2>&1 \
+       && $pmbin list packages 2>/dev/null | grep -q "^package:$PKG_APP\$"; then
+        ok "APK установлен без диалога (через $pmbin) — иконка в меню"
         return 0
     fi
-    # 2) системный установщик Android — нужен доступ Termux «Установка приложений»
-    echo "pm не смог (нет shell-прав) — открываю системный установщик Android."
+    # 2) системный установщик Android: нужен доступ Termux «Установка приложений»
+    pkg_ensure termux-open termux-tools >/dev/null 2>&1 || true
+    echo "открываю системный установщик Android…"
     if command -v termux-open >/dev/null 2>&1; then
-        termux-open "$apk"
-        echo "Подтверди установку на экране телефона."
-        echo "Нет окна? Разреши Termux установку приложений и повтори: termux-open \"$apk\""
+        termux-open --content-type application/vnd.android.package-archive "$apk" 2>/dev/null \
+            || termux-open "$apk" || true
+        echo "Подтверди установку на экране телефона (кнопка «Установить»)."
+        echo "Нет окна? Android ${DEV_API}: Настройки → Приложения → Termux →"
+        echo "  «Установка неизвестных приложений» → Разрешить, затем:"
+        echo "  termux-open \"$apk\""
+    else
+        echo "termux-open недоступен — открой APK из файлового менеджера:"
+        echo "  $apk"
     fi
-    # 3) запасные пути без root
+    # 3) запасные пути
     echo "Другие способы:"
-    echo "  • открыть файл из папки Download в файловом менеджере: $apk"
-    echo "  • через Shizuku:   rish pm install -r \"$apk\""
-    echo "  • с компьютера:    adb install -r \"$apk\""
+    echo "  • файловый менеджер: $apk"
+    echo "  • Shizuku:  rish pm install -r \"$apk\""
+    echo "  • с ПК:     adb install -r \"$apk\""
     return 0
 }
 
 task_doctor() {
     command -v codemobile >/dev/null 2>&1 && codemobile doctor || echo "codemobile не установлен"
+}
+
+# Android 12+ (API 31+) убивает дочерние процессы («phantom process killer»).
+# Если есть rish (Shizuku) — выключаем автоматически, иначе даём точную команду.
+phantom_check() {
+    case "${DEV_API:-?}" in ''|*[!0-9]*) echo "phantom killer: версия Android неизвестна — пропускаю"; return 0 ;; esac
+    [ "$DEV_API" -ge 31 ] || { echo "phantom killer: не нужен (Android API $DEV_API)"; return 0; }
+    local rish=""
+    if   [ -x "$HOME_DIR/rish" ]; then rish="$HOME_DIR/rish"
+    elif command -v rish >/dev/null 2>&1; then rish="$(command -v rish)"
+    fi
+    if [ -n "$rish" ]; then
+        if "$rish" settings put global settings_enable_monitor_phantom_procs false >/dev/null 2>&1; then
+            echo "phantom killer: отключён через rish/Shizuku ✓"; return 0
+        fi
+    fi
+    echo "phantom killer: Android API $DEV_API может убивать фоновые процессы."
+    echo "  Выключить: rish settings put global settings_enable_monitor_phantom_procs false"
+    echo "  (нужен Shizuku; подробности — в подсказках ниже)"
 }
 
 # =============================================================================
@@ -697,7 +921,7 @@ say ""
 STEPS=(); LABELS=()
 add() { STEPS+=("$2"); LABELS+=("$1"); }
 
-add "Базовые пакеты (tur-repo, python, node, git…)" task_pkg
+add "Адаптация системы: репозитории Termux + пакеты" task_pkg
 add "Зависимости" task_deps
 [ "$WANT_BUILD" = 1 ]    && add "Набор для сборки: JDK 21 + aapt2" task_toolchain
 [ "$WANT_BUILD" = 1 ]    && add "Android SDK (платформа 34, build-tools 36)" task_sdk
@@ -749,6 +973,8 @@ say "  • Пароль code-server: ${C}cat ~/.config/code-server/config.yaml${
 [ "$WANT_BUILD" = 1 ] && say "  • Сборка из исходников: ${C}codemobile build${N} → APK в Download/CodeMobile-<версия>.apk"
 say ""
 say "${DIM}После установки выполни: termux-reload-settings${N}"
+say ""
+phantom_check | sed 's/^/  /'
 
 # ── Подсказки Xiaomi / Shizuku ───────────────────────────────────────────────
 if [ "$WANT_HINTS" = 1 ]; then
