@@ -207,21 +207,135 @@ pick_dl() {
     fi
 }
 
-pkg_install() {                          # pkg_install <пакеты…>
-    if command -v pkg >/dev/null 2>&1; then
-        pkg install -y "$@" || return 1
-    elif command -v apt >/dev/null 2>&1; then
-        apt install -y "$@" || return 1
-    else
-        return 1
+# ═══════════════════════════════════════════════════════════════════════════
+#  Самовосстановление системы: репозитории Termux, имена пакетов, устройство
+#  Цель — чтобы пользователю достаточно было поставить Termux и дать доступ
+#  к файлам: все различия окружения скрипт выясняет и обходит сам.
+# ═══════════════════════════════════════════════════════════════════════════
+DEV_ARCH=""; DEV_API=""; TERMUX_VER=""; _APT_REFRESHED=0; _APT=""
+TIMEOUT_BIN="$(command -v timeout 2>/dev/null || true)"
+# Официальные зеркала репозитория Termux (в порядке предпочтения).
+APT_MIRRORS="https://packages.termux.dev/apt/termux-main https://packages-cf.termux.dev/apt/termux-main https://grimler.se/termux/termux-main https://mirror.mwt.me/termux/main"
+
+detect_device() {
+    DEV_ARCH=$(uname -m 2>/dev/null || echo "?")
+    TERMUX_VER="${TERMUX_VERSION:-?}"
+    DEV_API=$(getprop ro.build.version.sdk 2>/dev/null | tr -cd '0-9')
+    [ -n "$DEV_API" ] || DEV_API="?"
+    info "устройство: $DEV_ARCH · Android API $DEV_API · Termux $TERMUX_VER"
+}
+
+apt_bin() {                              # выбрать apt/pkg один раз
+    [ -n "$_APT" ] && return 0
+    if   command -v apt >/dev/null 2>&1; then _APT=apt
+    elif command -v pkg >/dev/null 2>&1; then _APT=pkg
+    else _APT=""; return 1
     fi
+}
+
+apt_dpkg_heal() {                        # добить прерванные установки (dpkg lock)
+    command -v dpkg >/dev/null 2>&1 || return 0
+    dpkg --configure -a >/dev/null 2>&1 || true
+    return 0
+}
+
+apt_update_raw() {                       # apt_update_raw <секунды> [доп-флаги…]
+    _t="$1"; shift
+    if [ -n "$TIMEOUT_BIN" ]; then
+        LC_ALL=C "$TIMEOUT_BIN" "$_t" "$_APT" update "$@" 2>&1
+    else
+        LC_ALL=C "$_APT" update "$@" 2>&1
+    fi
+}
+
+# Обновление изолированно: только один source, свой каталог списков.
+# apt возвращает 0 даже при сбое, поэтому судим по выводу и по файлам *_Packages.
+apt_iso_ok() {                           # apt_iso_ok <секунды> <source-file>
+    _ld=$(mktemp -d "${TMPDIR:-$PREFIX/tmp}/codemobile-apt.XXXXXX") || return 1
+    _o=$(apt_update_raw "$1" -o Dir::Etc::sourcelist="$2" \
+             -o Dir::Etc::sourceparts="-" -o Dir::State::lists="$_ld")
+    _res=1
+    printf '%s' "$_o" | grep -qiE 'failed to (fetch|download)' && _res=0
+    find "$_ld" -name '*_Packages*' 2>/dev/null | grep -q . || _res=0
+    rm -rf "$_ld"
+    return $((1 - _res))
+}
+
+apt_primary_ok() {                       # живой ли основной репозиторий из sources.list
+    apt_iso_ok 180 "$PREFIX/etc/apt/sources.list"
+}
+
+apt_fix_mirror() {                       # переключить основной репо на рабочее зеркало
+    _sl="$PREFIX/etc/apt/sources.list"
+    [ -w "$_sl" ] || [ -w "$(dirname "$_sl")" ] || return 1
+    _try="$PREFIX/etc/apt/codemobile-mirror.list"
+    for _m in $APT_MIRRORS; do
+        printf 'deb %s stable main\n' "$_m" >"$_try" 2>/dev/null || continue
+        if apt_iso_ok 180 "$_try"; then
+            [ -f "$_sl.codemobile.bak" ] || cp -p "$_sl" "$_sl.codemobile.bak" 2>/dev/null
+            printf 'deb %s stable main\n' "$_m" >"$_sl"
+            rm -f "$_try"
+            ok "репозиторий Termux переключён на $_m"
+            return 0
+        fi
+    done
+    rm -f "$_try"
+    return 1
+}
+
+apt_refresh() {
+    [ "$_APT_REFRESHED" = 1 ] && return 0
+    apt_bin || return 1
+    apt_dpkg_heal
+    info "обновляю списки пакетов Termux…"
+    _o=$(apt_update_raw 300)
+    if ! printf '%s' "$_o" | grep -qiE 'failed to (fetch|download)'; then
+        _APT_REFRESHED=1; return 0
+    fi
+    # Сбои были. Если основной репозиторий жив — виноваты сторонние (tur/opencode).
+    if apt_primary_ok; then
+        _APT_REFRESHED=1; return 0
+    fi
+    warn "основной репозиторий Termux не отвечает — подбираю рабочее зеркало…"
+    if apt_fix_mirror; then
+        apt_update_raw 300 >/dev/null 2>&1 || true
+        _APT_REFRESHED=1; return 0
+    fi
+    warn "репозитории Termux недоступны — ставлю пакеты как есть"
+    return 1
+}
+
+pkg_install() {                          # pkg_install <пакеты…>
+    [ "$_APT_REFRESHED" = 1 ] || apt_refresh >/dev/null 2>&1 || true
+    apt_bin || return 1
+    if [ -n "$TIMEOUT_BIN" ]; then
+        "$TIMEOUT_BIN" 900 "$_APT" install -y "$@"
+    else
+        "$_APT" install -y "$@"
+    fi
+}
+
+# Поставить пакет, перебрав возможные имена (в разных сборках Termux они разные).
+pkg_ensure() {                           # pkg_ensure <проверка-команда> <пакет…>
+    _chk="$1"; shift
+    command -v "$_chk" >/dev/null 2>&1 && return 0
+    _i=0
+    while [ "$_i" -lt 2 ]; do
+        _i=$((_i + 1))
+        for _p in "$@"; do
+            pkg_install "$_p" >/dev/null 2>&1 || continue
+            command -v "$_chk" >/dev/null 2>&1 && return 0
+        done
+        apt_dpkg_heal                     # вторая попытка — после починки dpkg
+    done
+    return 1
 }
 
 ensure_dl() {
     pick_dl
     [ -n "$DL" ] && return 0
     warn "нет ни curl, ни wget, ни python3, ни node — доставлю curl…"
-    pkg_install curl || true
+    pkg_ensure curl curl || true
     pick_dl
     [ -n "$DL" ] && return 0
     err "не удалось получить загрузчик. Поставь вручную: pkg install curl"
@@ -234,12 +348,17 @@ download() {
     rm -f "$_file" 2>/dev/null
     case "$DL" in
         curl)
+            # --speed-limit/--speed-time: обрываем «зависшую» загрузку, а не ждём
+            # 15 минут; --retry добивает разовые сбои. Докачка (-C -) для архивов
+            # GitHub НЕ работает (codeload отдаёт 200 без Range), поэтому — заново.
             if [ -t 1 ]; then
-                curl -fL --progress-bar --retry 3 --retry-delay 2 \
+                curl -fL --progress-bar --retry 4 --retry-delay 2 \
+                     --speed-limit 1024 --speed-time 45 \
                      --connect-timeout 20 --max-time 900 -o "$_file" "$_url"
             else
-                curl -fsSL --retry 3 --retry-delay 2 --connect-timeout 20 \
-                     --max-time 900 -o "$_file" "$_url"
+                curl -fsSL --retry 4 --retry-delay 2 \
+                     --speed-limit 1024 --speed-time 45 \
+                     --connect-timeout 20 --max-time 900 -o "$_file" "$_url"
             fi ;;
         wget)
             wget -O "$_file" --tries=3 --timeout=30 "$_url" ;;
@@ -270,36 +389,81 @@ fetch(url, { redirect: "follow" }).then(async r => {
     esac
 }
 
-# файл скачался целиком (а не HTML-ошибка зеркала)?
+# файл скачался целиком (а не HTML-ошибка зеркала и не обрезок)?
 looks_valid() {                          # looks_valid <файл> [zip|tar]
     _f="$1"; _kind="${2:-tar}"
     [ -s "$_f" ] || return 1
     _sz=$(wc -c <"$_f" 2>/dev/null | tr -d ' ')
     [ -n "$_sz" ] && [ "$_sz" -gt 2048 ] || return 1
+    # первые 2 байта: отсекаем HTML-страницы прокси (<!DOCTYPE/<<) и мусор
+    _magic=$(dd if="$_f" bs=1 count=2 2>/dev/null | od -An -tx1 | tr -d ' \n')
+    case "$_magic" in
+        3c*) return 1 ;;                 # '<' — это HTML, а не архив
+    esac
     if [ "$_kind" = zip ]; then
-        command -v unzip >/dev/null 2>&1 && unzip -tqq "$_f" >/dev/null 2>&1
-        return $?
+        case "$_magic" in 504b) ;; *) return 1 ;; esac   # PK
+        command -v unzip >/dev/null 2>&1 && { unzip -tqq "$_f" >/dev/null 2>&1; return $?; }
+        return 0
     fi
+    case "$_magic" in 1f8b) ;; *) return 1 ;; esac        # gzip
     if command -v gzip >/dev/null 2>&1; then gzip -t "$_f" >/dev/null 2>&1; return $?; fi
     if command -v tar  >/dev/null 2>&1; then tar -tzf "$_f" >/dev/null 2>&1; return $?; fi
     return 0
 }
 
-# try_download FILE LISTFILE — перебирает адреса, пока какой-то не сработает
+# ── Выбор рабочего зеркала: замер отклика, лучшие — первыми ──────────────────
+probe_time() {                           # probe_time <url> → секунды (9.9 = недоступно)
+    _u="$1"
+    [ "$DL" = curl ] || { printf '0.5\n'; return 0; }
+    _t=$(curl -o /dev/null -s -w '%{time_total}' -r 0-2047 \
+              --connect-timeout 3 --max-time 5 -fL "$_u" 2>/dev/null) || _t=9.9
+    [ -n "$_t" ] || _t=9.9
+    printf '%s\n' "$_t"
+}
+
+order_urls() {                           # stdin: URL-ы → stdout: самые быстрые первыми
+    [ "$DL" = curl ] || { cat; return 0; }
+    while IFS= read -r _u; do
+        [ -n "$_u" ] || continue
+        printf '%s %s\n' "$(probe_time "$_u")" "$_u"
+    done | sort -n | awk '{ print $2 }'
+}
+
+# try_download FILE LISTFILE KIND — перебирает адреса (сначала быстрые),
+# на каждый — по две попытки, пока не получится целый архив.
 try_download() {
     _dest="$1"; _list="$2"; _kind="$3"
-    _n=0
+    _ordered=""
+    if [ "$DL" = curl ]; then
+        _ordered=$(mktemp "${TMPDIR:-$PREFIX/tmp}/codemobile-ord.XXXXXX" 2>/dev/null || true)
+        if [ -n "$_ordered" ]; then
+            info "замеряю зеркала и выбираю быстрейшее…"
+            order_urls <"$_list" >"$_ordered" 2>/dev/null || cp "$_list" "$_ordered"
+        else
+            cp "$_list" "$_ordered" 2>/dev/null || _ordered="$_list"
+        fi
+    else
+        _ordered="$_list"
+    fi
+
     while IFS= read -r u; do
         [ -n "$u" ] || continue
-        _n=$((_n + 1))
         info "пробую: $u"
-        if download "$u" "$_dest" && looks_valid "$_dest" "$_kind"; then
-            _sz=$(du -h "$_dest" 2>/dev/null | cut -f1)
-            ok "скачано (${_sz:-?})"
-            return 0
-        fi
+        _try=0
+        while [ "$_try" -lt 2 ]; do
+            _try=$((_try + 1))
+            rm -f "$_dest" 2>/dev/null
+            if download "$u" "$_dest" && looks_valid "$_dest" "$_kind"; then
+                _sz=$(du -h "$_dest" 2>/dev/null | cut -f1)
+                ok "скачано (${_sz:-?})"
+                [ "$_ordered" = "$_list" ] || rm -f "$_ordered" 2>/dev/null
+                return 0
+            fi
+            [ "$_try" -lt 2 ] && info "повтор той же загрузки…"
+        done
         warn "не вышло — пробую следующее зеркало…"
-    done <"$_list"
+    done <"$_ordered"
+    [ "$_ordered" = "$_list" ] || rm -f "$_ordered" 2>/dev/null
     return 1
 }
 
@@ -330,27 +494,16 @@ extract_into() {                         # extract_into <архив> <куда> 
 }
 
 # ── Зависимости: python/node/unzip (+ необязательные) ────────────────────────
+# Имена пакетов различаются между сборками Termux (nodejs-lts ↔ nodejs,
+# python ↔ python3), поэтому перебираем варианты, а не полагаемся на один.
 install_deps() {
-    need=""
-    for p in $DEPS_ESSENTIAL; do
-        case "$p" in
-            python)    command -v python3 >/dev/null 2>&1 && continue ;;
-            nodejs-lts) command -v node >/dev/null 2>&1 || command -v npm >/dev/null 2>&1 && continue ;;
-            *)         command -v "$p" >/dev/null 2>&1 && continue ;;
-        esac
-        need="$need $p"
-    done
-    [ -n "$need" ] || { ok "зависимости уже на месте (curl, python, node, unzip)"; return 0; }
-    info "CodeMobile нужны: python3 — оформление и мерж настроек, node — ИИ-ассистент и модели,"
-    info "unzip — распаковка архивов/APK. Ставлю через pkg (это пакеты Termux, ~150 МБ):"
-    info "доставляю:${need}"
-    # сначала пробуем одним заходом, затем — по одному (чтобы одна сломанная
-    # репа не валила всю установку)
-    if ! pkg_install $need; then
-        for p in $need; do
-            pkg_install "$p" || warn "не поставился пакет: $p (продолжаю)"
-        done
-    fi
+    apt_refresh
+    info "CodeMobile нужны: python3 — оформление и мерж настроек, node — ИИ-ассистент"
+    info "и модели, unzip — распаковка архивов/APK. Ставлю через pkg (~150 МБ):"
+    pkg_ensure curl    curl    || true
+    pkg_ensure python3 python  || warn "python3 не встал — часть шагов пропустится"
+    pkg_ensure node    nodejs-lts nodejs || warn "node не встал — понадобится ИИ-ассистенту позже"
+    pkg_ensure unzip   unzip   || true
     for p in $DEPS_OPTIONAL; do
         command -v "$p" >/dev/null 2>&1 || pkg_install "$p" >/dev/null 2>&1 || true
     done
@@ -399,6 +552,7 @@ main() {
 
     # 2) окружение
     check_termux || exit 1
+    detect_device
 
     # 3) уже скачано? (быстрый путь — без сети)
     if [ -f "$SRC_DIR/install.sh" ] && [ -f "$SRC_DIR/tools/settings.seed.json" ] && [ "$FORCE_UPDATE" = 0 ]; then
@@ -414,11 +568,27 @@ main() {
 
         say "${B}Скачиваю проект${N} ($GITHUB_REPO @ $GITHUB_BRANCH, ${KIND})"
         list_archive >"$LISTS"
-        if ! try_download "$ARCH" "$LISTS" "$KIND"; then
+        if try_download "$ARCH" "$LISTS" "$KIND"; then
+            :
+        elif [ "$KIND" = tar ]; then
+            # адаптация: tar.gz не вышел — пробуем zip-архив того же репо
+            warn "tar.gz не удалось — пробую zip-архив…"
+            ARCH="${ARCH%.tar.gz}.zip"; KIND=zip; USE_ZIP=1
+            list_archive >"$LISTS"
+            if ! try_download "$ARCH" "$LISTS" "$KIND"; then
+                err "не удалось скачать архив ни с GitHub, ни с зеркал."
+                say "  Что проверить:"
+                say "   • интернет и что GitHub/зеркала не заблокированы;"
+                say "   • своё зеркало: ${C}sh get.sh --mirror https://ghproxy.net/${N}"
+                say "   • другой репозиторий/ветку: --repo owner/repo --branch main"
+                rm -f "$LISTS" "$ARCH"; exit 1
+            fi
+        else
             err "не удалось скачать архив ни с GitHub, ни с зеркал."
-            say "  Проверь интернет и повтори. Можно задать зеркало вручную:"
-            say "  ${C}sh get.sh --mirror https://ghproxy.net/${N}"
-            say "  или указать другой репозиторий/ветку: --repo owner/repo --branch main"
+            say "  Что проверить:"
+            say "   • интернет и что GitHub/зеркала не заблокированы;"
+            say "   • своё зеркало: ${C}sh get.sh --mirror https://ghproxy.net/${N}"
+            say "   • другой репозиторий/ветку: --repo owner/repo --branch main"
             rm -f "$LISTS" "$ARCH"; exit 1
         fi
         rm -f "$LISTS"
@@ -443,6 +613,7 @@ main() {
     [ -f "$SRC_DIR/install.sh" ] || { err "нет $SRC_DIR/install.sh"; exit 1; }
     say "${B}Запускаю установщик проекта…${N}"
     say ""
+    command -v bash >/dev/null 2>&1 || { warn "нет bash — доставляю (нужен установщику)…"; pkg_ensure bash bash || true; }
     # shellcheck disable=SC2086
     if command -v bash >/dev/null 2>&1; then
         exec bash "$SRC_DIR/install.sh" $PASS
