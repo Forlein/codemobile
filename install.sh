@@ -727,6 +727,21 @@ task_deps() {
     return 0
 }
 
+# aapt2 из Termux линкуется с libprotobuf: при рассинхроне версий пакетов он не
+# запускается («cannot locate symbol … protobuf …»), хотя файл на месте. Поэтому
+# проверяем ЗАПУСКОМ, а не наличием, и лечим выравниванием версий.
+aapt2_ok() { command -v aapt2 >/dev/null 2>&1 && aapt2 version >/dev/null 2>&1; }
+
+fix_aapt2() {
+    aapt2_ok && return 0
+    info "aapt2 не запускается — выравниваю версии aapt2/libprotobuf…"
+    pkg_install libprotobuf >/dev/null 2>&1 || true
+    aapt2_ok && return 0
+    pkg_install aapt2 libprotobuf >/dev/null 2>&1 || true
+    apt_dpkg_heal
+    aapt2_ok
+}
+
 # ── Режим сборки: JDK 21 + нативный aapt2 ────────────────────────────────────
 task_toolchain() {
     # JDK 21 (AGP 9.x требует 17+) — версии перебираем. aapt2 ставим ИЗ TERMUX:
@@ -734,6 +749,7 @@ task_toolchain() {
     pkg_ensure java  openjdk-21 openjdk-17 || { echo "нет java (JDK)"; return 1; }
     pkg_ensure aapt2 aapt2 || { echo "нет aapt2"; return 1; }
     pkg_ensure unzip unzip || true
+    fix_aapt2 || { echo "aapt2 не запускается даже после обновления libprotobuf"; return 1; }
     if [ -z "${JAVA_HOME:-}" ] || [ ! -d "${JAVA_HOME:-/nonexistent}" ]; then
         local d
         for d in "$PREFIX"/lib/jvm/*/; do [ -d "$d" ] && JAVA_HOME="${d%/}" && break; done

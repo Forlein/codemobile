@@ -289,6 +289,11 @@ codemobile build            # → Download/CodeMobile-<версия>.apk
 нативный `aapt2` из Termux (сборка из Maven собрана под x86_64 и на телефоне не
 запускается) и запишет `sdk.dir` в `local.properties`.
 
+> `aapt2` из Termux линкуется с `libprotobuf`. Если версии разъехались
+> (например, `aapt2 16.0.0.4-3` требует `libprotobuf` 36.x, а стоит 35.x),
+> `aapt2` падает с `cannot locate symbol … protobuf …`. Установщик проверяет
+> `aapt2` запуском и сам выравнивает версии `aapt2` + `libprotobuf`.
+
 ### На ПК / в CI
 
 Нужны Android SDK (compileSdk 34, build‑tools 36.0.0) и JDK 17+.
