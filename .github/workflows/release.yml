@@ -24,8 +24,18 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # На runner'е Android SDK уже предустановлен (ANDROID_HOME).
+      # Доставляем только нужные пакеты; если не выйдет — AGP до-скачает сам.
+      - name: Ensure Android SDK packages
+        continue-on-error: true
+        run: |
+          SDK="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-/usr/local/lib/android/sdk}}"
+          SM="$(ls -d "$SDK"/cmdline-tools/*/bin/sdkmanager 2>/dev/null | head -n1)"
+          [ -n "$SM" ] || SM="$(command -v sdkmanager || true)"
+          if [ -n "$SM" ]; then
+            yes | "$SM" --licenses >/dev/null 2>&1 || true
+            "$SM" "platform-tools" "platforms;android-34" "build-tools;34.0.0" >/dev/null 2>&1 || true
+          fi
 
       - name: Disable Termux aapt2 override (CI — обычный x86_64)
         run: sed -i 's|^android.aapt2FromMavenOverride=.*|# override отключён в CI|' gradle.properties
