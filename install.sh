@@ -1066,16 +1066,19 @@ task_apk() {
     }
 
     # 1) shell-права: root/adb или Shizuku (rish) — ставим без диалога
-    local pmbin=""
+    local pmbin="" pmout=""
     command -v pm >/dev/null 2>&1 && pmbin="pm"
     if [ -z "$pmbin" ]; then
         if   [ -x "$HOME_DIR/rish" ]; then pmbin="$HOME_DIR/rish pm"
         elif command -v rish >/dev/null 2>&1; then pmbin="rish pm"
         fi
     fi
-    if [ -n "$pmbin" ] && $pmbin install -r "$apk" >/dev/null 2>&1 && _apk_installed "$pmbin"; then
-        ok "APK установлен без диалога (через $pmbin) — иконка «VS Code» в меню"
-        return 0
+    if [ -n "$pmbin" ]; then
+        pmout="$($pmbin install -r "$apk" 2>&1)"
+        if _apk_installed "$pmbin"; then
+            ok "APK установлен без диалога (через $pmbin) — иконка «VS Code» в меню"
+            return 0
+        fi
     fi
     # 2) системный установщик Android: нужен доступ Termux «Установка приложений»
     pkg_ensure termux-open termux-tools >/dev/null 2>&1 || true
@@ -1091,10 +1094,22 @@ task_apk() {
     if _apk_installed; then
         ok "APK-лаунчер установлен — в меню приложений иконка «VS Code»"
     else
-        warn "APK скачан, но не установлен: подтверди установку в диалоге Android"
-        echo "  • нет диалога? Настройки → Приложения → Termux →"
-        echo "    «Установка неизвестных приложений» → Разрешить, затем:"
-        echo "      termux-open \"$apk\""
+        warn "APK скачан, но не установлен"
+        # Частая причина: установлена сборка с тем же пакетом, но другой подписью
+        # (релиз собран в CI своим debug-ключом, а на телефоне — локальная сборка).
+        if printf '%s' "$pmout" | grep -qiE 'UPDATE_INCOMPATIBLE|signatures do not match|ALREADY_EXISTS'; then
+            echo "  Похоже на конфликт подписи: уже стоит другая сборка «$PKG_APP»."
+            echo "  Удали старую и поставь заново:"
+            echo "    ${pmbin:-pm} uninstall $PKG_APP     # или: Настройки → Приложения → «VS Code» → Удалить"
+            echo "    termux-open \"$apk\""
+        elif printf '%s' "$pmout" | grep -qiE 'PARSE_FAILED|No such file|not a valid'; then
+            echo "  APK повреждён или неполный — скачай заново (размер ~700 КБ):"
+            echo "    rm -f \"$apk\" && bash install.sh --yes"
+        else
+            echo "  • нет диалога? Настройки → Приложения → Termux →"
+            echo "    «Установка неизвестных приложений» → Разрешить, затем:"
+            echo "      termux-open \"$apk\""
+        fi
         echo "  • Shizuku: rish pm install -r \"$apk\""
         echo "  • с ПК:    adb install -r \"$apk\""
         echo "  файл: $apk"
