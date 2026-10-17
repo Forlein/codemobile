@@ -1047,13 +1047,24 @@ task_apk() {
             fi
         fi
     fi
-    if [ -z "$apk" ] || [ ! -f "$apk" ]; then
-        echo "APK не найден (нет релиза с .apk). Собери сам: bash tools/build_apk.sh --release"
-        echo "или скачай вручную со страницы Releases репозитория $GITHUB_REPO"
+    if [ -z "$apk" ] || [ ! -s "$apk" ]; then
+        warn "APK-лаунчер не скачался (в релизе нет .apk или нет сети)"
+        echo "  Собери сам: bash tools/build_apk.sh --release"
+        echo "  Или скачай вручную со страницы Releases: $GITHUB_REPO"
         return 0
     fi
     ok "APK: $apk ($(du -h "$apk" | cut -f1))"
     if [ "$DRY" = 1 ]; then info "[dry] запустил бы установку $apk"; return 0; fi
+
+    # Установлен ли лаунчер (package com.example.opencodelauncher, метка «VS Code»).
+    # Без этой проверки шаг раньше писал [ok] даже когда APK только скачался.
+    # $1 — команда pm (по умолчанию «pm»; может быть «rish pm»).
+    _apk_installed() {
+        local pmc="${1:-pm}"
+        command -v "${pmc%% *}" >/dev/null 2>&1 || return 1
+        $pmc list packages 2>/dev/null | grep -q "^package:$PKG_APP\$"
+    }
+
     # 1) shell-права: root/adb или Shizuku (rish) — ставим без диалога
     local pmbin=""
     command -v pm >/dev/null 2>&1 && pmbin="pm"
@@ -1062,9 +1073,8 @@ task_apk() {
         elif command -v rish >/dev/null 2>&1; then pmbin="rish pm"
         fi
     fi
-    if [ -n "$pmbin" ] && $pmbin install -r "$apk" >/dev/null 2>&1 \
-       && $pmbin list packages 2>/dev/null | grep -q "^package:$PKG_APP\$"; then
-        ok "APK установлен без диалога (через $pmbin) — иконка в меню"
+    if [ -n "$pmbin" ] && $pmbin install -r "$apk" >/dev/null 2>&1 && _apk_installed "$pmbin"; then
+        ok "APK установлен без диалога (через $pmbin) — иконка «VS Code» в меню"
         return 0
     fi
     # 2) системный установщик Android: нужен доступ Termux «Установка приложений»
@@ -1073,19 +1083,22 @@ task_apk() {
     if command -v termux-open >/dev/null 2>&1; then
         termux-open --content-type application/vnd.android.package-archive "$apk" 2>/dev/null \
             || termux-open "$apk" || true
-        echo "Подтверди установку на экране телефона (кнопка «Установить»)."
-        echo "Нет окна? Android ${DEV_API}: Настройки → Приложения → Termux →"
-        echo "  «Установка неизвестных приложений» → Разрешить, затем:"
-        echo "  termux-open \"$apk\""
-    else
-        echo "termux-open недоступен — открой APK из файлового менеджера:"
-        echo "  $apk"
+        # ждём, пока пользователь подтвердит установку (до 30 с)
+        local i
+        for i in $(seq 1 30); do _apk_installed && break; sleep 1; done
     fi
-    # 3) запасные пути
-    echo "Другие способы:"
-    echo "  • файловый менеджер: $apk"
-    echo "  • Shizuku:  rish pm install -r \"$apk\""
-    echo "  • с ПК:     adb install -r \"$apk\""
+    # 3) итог: говорим правду о том, установился лаунчер или нет
+    if _apk_installed; then
+        ok "APK-лаунчер установлен — в меню приложений иконка «VS Code»"
+    else
+        warn "APK скачан, но не установлен: подтверди установку в диалоге Android"
+        echo "  • нет диалога? Настройки → Приложения → Termux →"
+        echo "    «Установка неизвестных приложений» → Разрешить, затем:"
+        echo "      termux-open \"$apk\""
+        echo "  • Shizuku: rish pm install -r \"$apk\""
+        echo "  • с ПК:    adb install -r \"$apk\""
+        echo "  файл: $apk"
+    fi
     return 0
 }
 
